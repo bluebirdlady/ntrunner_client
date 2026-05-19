@@ -13,13 +13,12 @@ signal server_choice_resolved(server_id: String)
 signal search_choice_resolved(card: CardRecord)
 
 # Onready references using unique names (% badge in inspector)
-@onready var resource_label: Label = $MainContainer/StatePanel/StateVBox/ResourceLabel
-@onready var corp_hand_label: Label = $MainContainer/StatePanel/StateVBox/CorpHandLabel
-@onready var runner_hand_label: Label = $MainContainer/StatePanel/StateVBox/RunnerHandLabel
-@onready var servers_tree: Tree = %ServersTree
-
-@onready var log_text: TextEdit = %LogText
-@onready var action_menu: VBoxContainer = %ActionMenu
+@onready var resource_label = $MarginContainer/MainContainer/StatePanel/StateVBox/ResourceLabel
+@onready var servers_container = $MarginContainer/MainContainer/StatePanel/StateVBox/ServersScroll/ServersContainer
+@onready var runner_hand_container = $MarginContainer/MainContainer/StatePanel/StateVBox/RunnerHandContainer
+@onready var corp_hand_container = $MarginContainer/MainContainer/StatePanel/StateVBox/CorpHandContainer
+@onready var log_text = $MarginContainer/MainContainer/ControlPanel/LogText
+@onready var action_menu = $MarginContainer/MainContainer/ControlPanel/ActionMenu
 
 var _ctx: GameContext
 
@@ -56,13 +55,10 @@ func setup(ctx: GameContext, turn_manager: TurnManager, run_machine: RunStateMac
 		)
 
 	# Initialize visual configurations
-	_setup_tree_properties()
 	_update_all_displays()
 
 
-func _setup_tree_properties() -> void:
-	servers_tree.columns = 1
-	servers_tree.hide_root = true
+
 
 
 ## Forces a full structural re-render of current resources and card locations
@@ -77,15 +73,60 @@ func _update_all_displays() -> void:
 		"RUNNER | Credits: %d  | Clicks: %d | Points: %d | Tags: %d" % [_ctx.runner_credits, _ctx.runner_clicks, _ctx.runner_agenda_points(), _ctx.runner_tags]
 	)
 	
-	corp_hand_label.text = "Corp HQ Hand (%d cards):\n%s" % [_ctx.corp_hand.size(), _format_hand(_ctx.corp_hand)]
-	runner_hand_label.text = "Runner Grip (%d cards):\n%s" % [_ctx.runner_hand.size(), _format_hand(_ctx.runner_hand)]
+	#corp_hand_label.text = "Corp HQ Hand (%d cards):\n%s" % [_ctx.corp_hand.size(), _format_hand(_ctx.corp_hand)]
+	#runner_hand_label.text = "Runner Grip (%d cards):\n%s" % [_ctx.runner_hand.size(), _format_hand(_ctx.runner_hand)]
 	
-	# 2. Rebuild the visual server hierarchy
-	_rebuild_servers_tree()
+	# 2. Update hands (new)
+	_update_hands()
 	
-	# 3. Regenerate valid action options
+	# 3. Rebuild the visual server hierarchy (still Tree for now)
+	_update_servers()
+	
+	# 4. Regenerate valid action options
 	_populate_action_menu()
 
+func _update_hands() -> void:
+	# Clear existing cards
+	for child in corp_hand_container.get_children():
+		child.queue_free()
+	for child in runner_hand_container.get_children():
+		child.queue_free()
+	
+	# Corp hand
+	for entry in _ctx.corp_hand:
+		var record = entry.get("card_record") if entry is Dictionary else null
+		if record:
+			var card_view = CardView.new()
+			corp_hand_container.add_child(card_view)
+			card_view.setup(record, true)   # hand cards are always face-up
+			
+	
+	# Runner hand
+	for entry in _ctx.runner_hand:
+		var record = entry.get("card_record") if entry is Dictionary else null
+		if record:
+			var card_view = CardView.new()
+			runner_hand_container.add_child(card_view)
+			card_view.setup(record, true)
+			card_view.clicked.connect(_on_runner_hand_card_clicked)
+			
+
+func _on_runner_hand_card_clicked(card_record: CardRecord) -> void:
+	if _ctx.active_player != "runner":
+		_append_log("Not your turn to play cards.")
+		return
+	# Determine action based on card type
+	var action: GameAction = null
+	match card_record.card_type:
+		"event":
+			action = GameAction.play_operation(card_record)
+		"program", "hardware", "resource":
+			action = GameAction.install(card_record, "runner_rig")
+		_:
+			_append_log("Cannot play/install card type: %s" % card_record.card_type)
+			return
+	if action:
+		action_requested.emit(action)
 
 func _format_hand(hand: Array) -> String:
 	if hand.is_empty():
@@ -99,54 +140,68 @@ func _format_hand(hand: Array) -> String:
 	return "\n".join(lines)
 
 
-## Reconstructs the internal Tree representation of servers, ice, and assets
-func _rebuild_servers_tree() -> void:
-	servers_tree.clear()
-	var root_item: TreeItem = servers_tree.create_item()
+func _update_servers() -> void:
+	# Clear existing columns
+	for child in servers_container.get_children():
+		child.queue_free()
 	
 	if _ctx == null or not ("servers" in _ctx):
 		return
-
-	# Iterate over all tracked central and remote servers within context
-	for server_id in _ctx.servers:
+	
+	# Sort servers: centrals first (HQ, R&D, Archives), then remotes by name
+	var central_order = {"hq": 0, "rd": 1, "archives": 2}
+	var server_ids = _ctx.servers.keys()
+	server_ids.sort_custom(func(a, b):
+		var a_order = central_order.get(a, 999)
+		var b_order = central_order.get(b, 999)
+		if a_order == b_order:
+			return a < b
+		return a_order < b_order
+	)
+	
+	for server_id in server_ids:
 		var server: Server = _ctx.servers[server_id]
-		if server.is_empty() and server.is_remote():
-			continue 
-			
-		var server_item: TreeItem = servers_tree.create_item(root_item)
-		server_item.set_text(0, server_id.to_upper())
+		# Skip empty remote servers (optional – you may want to show empty slots)
+		if server.is_remote() and server.is_empty():
+			continue
 		
-		# Build ICE protecting the server (0 index is outermost)
-		if not server.ice.is_empty():
-			var ice_folder: TreeItem = servers_tree.create_item(server_item)
-			ice_folder.set_text(0, " 🧊 Protecting ICE:")
-			for i in range(server.ice.size()):
-				var ice_card: InstalledCard = server.ice[i]
-				var ice_item: TreeItem = servers_tree.create_item(ice_folder)
-				var status := "Rezzed" if ice_card.is_rezzed else "Unrezzed"
-				var title_text := ice_card.card_record.title if ice_card.card_record else "Unknown ICE"
-				ice_item.set_text(0, "   [%d] %s (%s)" % [i, title_text, status])
-		
-		# Build contents residing inside server roots
-		if not server.root.is_empty():
-			var root_folder: TreeItem = servers_tree.create_item(server_item)
-			root_folder.set_text(0, " 📂 Server Root:")
-			for entry in server.root:
-				var card: InstalledCard = entry as InstalledCard
-				if card == null:
-					continue
-					
-				# FIX: Declared root_item_card safely at top of scope loop block before processing formatting
-				var root_item_card: TreeItem = servers_tree.create_item(root_folder)
-				
-				var has_record: bool = card.card_record != null
-				var is_visible: bool = card.is_rezzed or (has_record and card.card_record.is_agenda())
-				var vis_name: String = card.card_record.title if (has_record and is_visible) else "Unrezzed Card"
-				
-				var adv_count := card.get_counter("advancement")
-				var adv_text := " [Adv: %d]" % adv_count if adv_count > 0 else ""
-				root_item_card.set_text(0, "   • %s%s" % [vis_name, adv_text])
+		var column = _create_server_column(server_id, server)
+		servers_container.add_child(column)
 
+
+func _create_server_column(server_id: String, server: Server) -> VBoxContainer:
+	var col = VBoxContainer.new()
+	col.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	col.add_theme_constant_override("separation", 4)
+	
+	# Server name label
+	var name_label = Label.new()
+	name_label.text = server.display_name()
+	name_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	name_label.add_theme_font_size_override("font_size", 14)
+	name_label.add_theme_color_override("font_color", Color(0.9, 0.9, 0.9))
+	col.add_child(name_label)
+	
+	# Ice stack – only add if there are ice cards
+	var ice_container = VBoxContainer.new()
+	ice_container.alignment = BoxContainer.ALIGNMENT_CENTER
+	for ice_card in server.ice:
+		var token = IceToken.new()
+		ice_container.add_child(token)
+		token.setup(ice_card)
+		# Optional: connect token.clicked to show full card tooltip
+	if ice_container.get_child_count() > 0:
+		col.add_child(ice_container)
+	
+	# Root card
+	if not server.root.is_empty():
+		var root_card: InstalledCard = server.root[0]
+		var root_view = CardView.new()
+		col.add_child(root_view)
+		var is_rezzed_root = root_card.is_rezzed and root_card.card_record.card_type == "upgrade"
+		root_view.setup(root_card.card_record, is_rezzed_root)
+	
+	return col
 
 ## Generates click choices dynamically based on which side holds active framework clicks
 func _populate_action_menu() -> void:
@@ -532,10 +587,10 @@ func show_server_choice_prompt(allowed_servers: Array) -> String:
 	prompt_box.add_child(lbl)
 
 	for server_id in allowed_servers:
-		var display := {"hq": "HQ", "rd": "R&D", "archives": "Archives"}.get(server_id, server_id)
+		var display: String = {"hq": "HQ", "rd": "R&D", "archives": "Archives"}.get(server_id, server_id)
 		var btn := Button.new()
 		btn.text = display
-		var sid := server_id  # capture
+		var sid: String = server_id  # capture
 		btn.pressed.connect(func():
 			server_choice_resolved.emit(sid)
 		)

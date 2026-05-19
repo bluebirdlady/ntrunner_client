@@ -1,0 +1,70 @@
+class_name IceToken
+extends Control
+
+signal clicked(ice_card: InstalledCard)
+
+var ice_card: InstalledCard = null
+var _ui_built := false
+var bg: Panel
+var name_label: Label
+var info_label: Label
+
+func _ensure_ui() -> void:
+	if _ui_built:
+		return
+	_ui_built = true
+	
+	custom_minimum_size = Vector2(120, 44)
+	size = Vector2(120, 44)
+	
+	bg = Panel.new()
+	bg.set_anchors_preset(Control.PRESET_FULL_RECT)
+	bg.modulate = Color(0.1, 0.1, 0.15)
+	add_child(bg)
+	
+	var vbox = VBoxContainer.new()
+	vbox.set_anchors_preset(Control.PRESET_FULL_RECT)
+	vbox.alignment = BoxContainer.ALIGNMENT_CENTER
+	vbox.add_theme_constant_override("separation", 2)
+	add_child(vbox)
+	
+	name_label = Label.new()
+	name_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	name_label.add_theme_font_size_override("font_size", 12)
+	name_label.add_theme_color_override("font_color", Color(0.9, 0.9, 0.9))
+	vbox.add_child(name_label)
+	
+	info_label = Label.new()
+	info_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	info_label.add_theme_font_size_override("font_size", 10)
+	info_label.add_theme_color_override("font_color", Color(0.7, 0.7, 0.7))
+	vbox.add_child(info_label)
+
+func setup(card: InstalledCard) -> void:
+	_ensure_ui()
+	ice_card = card
+	if card.is_rezzed and card.card_record:
+		var record = card.card_record
+		name_label.text = record.title
+		
+		# Find ice subtype
+		var subtype = ""
+		for st in record.subtypes:
+			var st_lower = st.to_lower()
+			if st_lower in ["barrier", "code gate", "sentry"]:
+				subtype = st_lower.capitalize()
+				break
+		
+		var strength = record.strength if record.strength > 0 else "?"
+		var rez_cost = record.cost
+		info_label.text = "[%s]  ⚡%s  Rez: %d₵" % [subtype, strength, rez_cost]
+		bg.modulate = Color(0.2, 0.2, 0.25)
+	else:
+		name_label.text = "???"
+		info_label.text = "ICE"
+		bg.modulate = Color(0.1, 0.1, 0.15)
+
+func _gui_input(event: InputEvent) -> void:
+	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT and event.pressed:
+		if ice_card:
+			clicked.emit(ice_card)
