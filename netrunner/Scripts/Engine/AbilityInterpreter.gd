@@ -188,6 +188,126 @@ func _execute_effect(effect: Dictionary, ctx: GameContext, chosen_target: Varian
 			var amount: int     = params.get("amount", 1)
 			_draw_cards(subject, amount, ctx)
 
+		"runner_must_pay_or_end_run":
+			# Runner must choose one of the listed payment options or end the run.
+			# Used by Manegarm Skunkworks.
+			var options: Array = params.get("options", []) as Array
+			if options.is_empty():
+				return
+
+			# Build available options the runner can actually afford
+			var affordable: Array = []
+			for opt in options:
+				var o: Dictionary = opt as Dictionary
+				match o.get("type", ""):
+					"clicks":
+						if ctx.runner_clicks >= o.get("amount", 0):
+							affordable.append(o)
+					"credits":
+						if ctx.runner_credits >= o.get("amount", 0):
+							affordable.append(o)
+
+			if affordable.is_empty():
+				ctx.log("Runner cannot afford any payment option — run ends.")
+				ctx.run_ended = true
+				return
+
+			# Ask runner to choose
+			var dm: Object = ctx.runner_decision_maker
+			var chosen: Variant = null
+			if dm != null and dm.has_method("choose_payment_option"):
+				chosen = await dm.choose_payment_option(affordable, ctx)
+			else:
+				chosen = null  # no decision maker — end run
+
+			if chosen == null:
+				ctx.log("Runner ends the run (Manegarm Skunkworks).")
+				ctx.run_ended = true
+				return
+
+			# Apply chosen payment
+			var c: Dictionary = chosen as Dictionary
+			match c.get("type", ""):
+				"clicks":
+					var amount: int = c.get("amount", 0)
+					ctx.runner_clicks -= amount
+					ctx.log("Runner spends %d click(s) for Manegarm Skunkworks." % amount)
+				"credits":
+					var amount: int = c.get("amount", 0)
+					ctx.runner_credits -= amount
+					ctx.log("Runner pays %d cr for Manegarm Skunkworks." % amount)
+
+		"install_ice_from_hq":
+			# Corp chooses an ice from HQ (or Archives if allowed) and installs it
+			# on the current run server ignoring all costs.
+			var also_archives: bool = params.get("also_archives", false)
+			var candidates: Array = []
+			for entry in ctx.corp_hand:
+				var e: Dictionary = entry as Dictionary
+				var r: CardRecord = e.get("card_record", null) as CardRecord
+				if r != null and r.is_ice():
+					candidates.append(e)
+			if also_archives:
+				for r in ctx.corp_discard:
+					var record: CardRecord = r as CardRecord
+					if record != null and record.is_ice():
+						candidates.append({"card_id": record.id, "card_record": record, "_from_archives": true})
+			if candidates.is_empty():
+				ctx.log("Corp has no ice in HQ%s to install." % (" or Archives" if also_archives else ""))
+			else:
+				var dm: Object = ctx.corp_decision_maker
+				var chosen_entry: Variant = null
+				if dm != null and dm.has_method("choose_card_from_hand"):
+					chosen_entry = await dm.choose_card_from_hand(candidates, ctx)
+				else:
+					chosen_entry = candidates[0]
+				if chosen_entry != null:
+					var record: CardRecord = (chosen_entry as Dictionary).get("card_record", null) as CardRecord
+					if record != null:
+						if (chosen_entry as Dictionary).get("_from_archives", false):
+							ctx.corp_discard.erase(record)
+						else:
+							ctx.corp_hand.erase(chosen_entry)
+						var server: Server = ctx.get_server(ctx.run_target_server)
+						if server != null:
+							var installed := InstalledCard.make_runtime_instance(record, ctx.run_target_server, "ice", false)
+							server.install_ice(installed)
+							ctx.log("Corp installs %s from %s on %s (ignoring costs)." % [
+								record.title,
+								"Archives" if (chosen_entry as Dictionary).get("_from_archives", false) else "HQ",
+								server.display_name()
+							])
+
+		"trash_runner_installed":
+			# Trash one of the runner\'s installed cards matching given types.
+			var card_types: Array = params.get("card_types", ["resource"]) as Array
+			var subtypes: Array   = params.get("subtypes", []) as Array
+			var pool: Array = ctx.runner_rig.filter(func(c: InstalledCard):
+				if c.card_record == null:
+					return false
+				var type_match := card_types.is_empty() or card_types.has(c.card_record.card_type)
+				var sub_match  := subtypes.is_empty()
+				if not sub_match:
+					for st in subtypes:
+						if c.card_record.has_subtype(st):
+							sub_match = true
+							break
+				return type_match and sub_match
+			)
+			if pool.is_empty():
+				ctx.log("No valid runner cards to trash.")
+			else:
+				var dm: Object = ctx.corp_decision_maker
+				var target: InstalledCard = null
+				if dm != null and dm.has_method("choose_target"):
+					target = await dm.choose_target(pool, {"reason": "trash_runner_installed"})
+				else:
+					target = pool[0] as InstalledCard
+				if target != null:
+					ctx.runner_rig.erase(target)
+					ctx.unregister_all_card_effects(target.runtime_instance_id)
+					ctx.log("Corp trashes runner\'s %s." % target.display_name())
+
 		"search_deck":
 			# Search deck for cards matching a condition, let player choose one,
 			# add it to hand, then shuffle the deck.
@@ -269,13 +389,16 @@ func _execute_effect(effect: Dictionary, ctx: GameContext, chosen_target: Varian
 
 		"initiate_run":
 			# Start a run as part of playing an event.
-			# The TurnManager must set ctx.run_state_machine before playing run events.
 			var server_id: String = params.get("server_id", "")
 			if server_id == "" and ctx.has_meta("chosen_run_server"):
 				server_id = ctx.get_meta("chosen_run_server")
 			if server_id == "" or not ctx.servers.has(server_id):
 				push_error("AbilityInterpreter: initiate_run has no valid server")
 				return
+			if ctx.has_meta("on_run_started"):
+				var cb: Callable = ctx.get_meta("on_run_started") as Callable
+				cb.call(server_id)
+				await Engine.get_main_loop().process_frame
 			var rsm: Object = ctx.get_meta("run_state_machine") if ctx.has_meta("run_state_machine") else null
 			if rsm == null:
 				push_error("AbilityInterpreter: initiate_run — no run_state_machine on ctx")
@@ -289,6 +412,10 @@ func _execute_effect(effect: Dictionary, ctx: GameContext, chosen_target: Varian
 			if ctx.runner_decision_maker != null and ctx.runner_decision_maker.has_method("choose_server"):
 				chosen = await ctx.runner_decision_maker.choose_server(allowed, ctx)
 			ctx.set_meta("chosen_run_server", chosen)
+			if ctx.has_meta("on_run_started"):
+				var cb: Callable = ctx.get_meta("on_run_started") as Callable
+				cb.call(chosen)
+				await Engine.get_main_loop().process_frame
 			var rsm: Object = ctx.get_meta("run_state_machine") if ctx.has_meta("run_state_machine") else null
 			if rsm == null:
 				push_error("AbilityInterpreter: choose_and_run — no run_state_machine on ctx")
@@ -350,7 +477,12 @@ func _execute_effect(effect: Dictionary, ctx: GameContext, chosen_target: Varian
 
 		"set_bonus_access_from_counters":
 			# Set run_modifiers["bonus_access"] to the card's current counter count.
-			# Used by Conduit to scale R&D access with virus counters.
+			# Only fires if the current run is on the required server (if specified).
+			var required_server: String = params.get("server", "")
+			if required_server != "":
+				var actual_server: String = ctx.current_event_data.get("server_id", "")
+				if actual_server != required_server:
+					return  # wrong server — do nothing
 			var counter_type: String = effect.get("counter", params.get("counter", "virus"))
 			var iid: String = ctx.current_event_data.get("card_instance_id", "")
 			var self_card := ctx.get_installed_card_by_instance_id(iid)
@@ -552,6 +684,8 @@ func process_encounter_action(action: Dictionary, encounter: EncounterState,
 			return _do_break_all(action, encounter, ctx, ability_registry)
 		"spend_hosted_credits":
 			return _do_spend_hosted_credits(action, encounter, ctx)
+		"break_with_click":
+			return _do_break_with_click(action, encounter, ctx)
 		"done":
 			return true
 		_:
@@ -677,6 +811,28 @@ func _do_break_all(action: Dictionary, encounter: EncounterState,
 			encounter.break_subroutine(idx)
 			var sub_label: String = (encounter.subroutines[idx] as Dictionary).get("label", "sub %d" % idx)
 			ctx.log("[Encounter] %s breaks \'%s\'." % [breaker.display_name(), sub_label])
+	return true
+
+
+func _do_break_with_click(action: Dictionary, encounter: EncounterState, ctx: GameContext) -> bool:
+	# Runner spends 1 click to break 1 subroutine on a bioroid.
+	# No strength check required — this is the ice's own ability, not an icebreaker.
+	if ctx.runner_clicks < 1:
+		ctx.log("[Encounter] Runner has no clicks to spend.")
+		return false
+	var sub_index: int = action.get("sub_index", -1)
+	if sub_index < 0 or sub_index >= encounter.subroutines.size():
+		push_error("AbilityInterpreter: break_with_click — invalid sub_index %d" % sub_index)
+		return false
+	if encounter.is_broken(sub_index):
+		ctx.log("[Encounter] Subroutine %d already broken." % sub_index)
+		return true
+	ctx.runner_clicks -= 1
+	encounter.break_subroutine(sub_index)
+	var sub_label: String = (encounter.subroutines[sub_index] as Dictionary).get("label", "sub %d" % sub_index)
+	ctx.log("[Encounter] Runner spends 1 click to break '%s'. (%d clicks remaining)" % [
+		sub_label, ctx.runner_clicks
+	])
 	return true
 
 

@@ -576,7 +576,9 @@
 				{
 					"type": "set_bonus_access_from_counters",
 					"counter": "virus",
-					"params": {}
+					"params": {
+						"server": "rd"
+					}
 				}
 			]
 		}
@@ -597,6 +599,95 @@
 					"type": "add_self_counters",
 					"counter": "credits",
 					"amount": 1
+				}
+			]
+		}
+	},
+	"bran_1_0": {
+		"subroutines": [
+			{
+				"label": "You may install 1 piece of ice from HQ or Archives directly inward from this ice, ignoring all costs.",
+				"effects": [
+					{
+						"type": "install_ice_from_hq",
+						"params": {
+							"also_archives": true
+						}
+					}
+				]
+			},
+			{
+				"label": "End the run.",
+				"effects": [
+					{
+						"type": "end_run"
+					}
+				]
+			},
+			{
+				"label": "End the run.",
+				"effects": [
+					{
+						"type": "end_run"
+					}
+				]
+			}
+		]
+	},
+	"ansel_1_0": {
+		"subroutines": [
+			{
+				"label": "Trash 1 installed resource or connection.",
+				"effects": [
+					{
+						"type": "trash_runner_installed",
+						"params": {
+							"card_types": [
+								"resource"
+							],
+							"subtypes": []
+						}
+					}
+				]
+			},
+			{
+				"label": "You may install 1 piece of ice from HQ in the outermost position protecting this server, ignoring all costs.",
+				"effects": [
+					{
+						"type": "install_ice_from_hq",
+						"params": {
+							"also_archives": false
+						}
+					}
+				]
+			},
+			{
+				"label": "End the run.",
+				"effects": [
+					{
+						"type": "end_run"
+					}
+				]
+			}
+		]
+	},
+	"manegarm_skunkworks": {
+		"approach_server": {
+			"effects": [
+				{
+					"type": "runner_must_pay_or_end_run",
+					"params": {
+						"options": [
+							{
+								"type": "clicks",
+								"amount": 2
+							},
+							{
+								"type": "credits",
+								"amount": 4
+							}
+						]
+					}
 				}
 			]
 		}

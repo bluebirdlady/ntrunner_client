@@ -376,7 +376,19 @@ func _do_play_operation(player: String, action: GameAction) -> void:
 func _do_run(action: GameAction) -> void:
 	_spend_click("runner")
 	var server_id: String = action.params.get("server_id", "hq")
-	var run := RunStateMachine.new(ctx, ability_registry)
+
+	# Notify Main so it can open RunScene before the run begins
+	if ctx.has_meta("on_run_started"):
+		var cb: Callable = ctx.get_meta("on_run_started") as Callable
+		cb.call(server_id)
+		await Engine.get_main_loop().process_frame
+
+	# Reuse the run_state_machine stored on ctx so RunScene stays connected
+	var run: RunStateMachine
+	if ctx.has_meta("run_state_machine"):
+		run = ctx.get_meta("run_state_machine") as RunStateMachine
+	else:
+		run = RunStateMachine.new(ctx, ability_registry)
 	await run.execute(server_id)
 
 
@@ -461,7 +473,7 @@ func _register_card_listeners(installed: InstalledCard) -> void:
 
 	# Register triggered event listeners
 	for event_type in ["corp_turn_start", "runner_turn_start", "on_rez",
-						"encounter_ice", "pass_ice", "successful_run"]:
+						"encounter_ice", "pass_ice", "successful_run", "approach_server"]:
 		var trigger_def = card_def.get(event_type, null)
 		if trigger_def != null:
 			ctx.register_listener(event_type, instance_id, trigger_def as Dictionary)

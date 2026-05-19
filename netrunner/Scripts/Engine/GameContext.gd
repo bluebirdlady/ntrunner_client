@@ -166,6 +166,10 @@ func get_installed_card_by_instance_id(instance_id: String) -> InstalledCard:
 func register_listener(event_type: String, instance_id: String, ability_def: Dictionary) -> void:
 	if not _event_listeners.has(event_type):
 		_event_listeners[event_type] = []
+	# Guard against duplicate registration for the same card instance
+	for existing in _event_listeners[event_type]:
+		if (existing as Dictionary).get("card_instance_id", "") == instance_id:
+			return
 	_event_listeners[event_type].append({
 		"card_instance_id": instance_id,
 		"ability_def": ability_def
@@ -174,6 +178,10 @@ func register_listener(event_type: String, instance_id: String, ability_def: Dic
 func register_modifier(mod_type: String, instance_id: String, value_modifier: int, conditions: Dictionary = {}) -> void:
 	if not _state_modifiers.has(mod_type):
 		_state_modifiers[mod_type] = []
+	# Guard against duplicate registration
+	for existing in _state_modifiers[mod_type]:
+		if (existing as Dictionary).get("card_instance_id", "") == instance_id:
+			return
 	_state_modifiers[mod_type].append({
 		"card_instance_id": instance_id,
 		"value": value_modifier,

@@ -25,7 +25,8 @@ var trash_proxy:             Callable
 var choose_modes_proxy:      Callable   # func(modes, max_choices) -> Array[int]
 var choose_server_proxy:      Callable   # func(allowed_servers) -> String
 var choose_card_from_hand_proxy:  Callable # func(hand) -> Dictionary
-var choose_from_search_proxy:     Callable # func(candidates) -> CardRecord
+var choose_from_search_proxy:      Callable # func(candidates) -> CardRecord
+var choose_payment_option_proxy:   Callable # func(options) -> Dictionary or null
 
 
 func choose_action(_ctx: GameContext) -> GameAction:
@@ -81,6 +82,13 @@ func choose_from_search(candidates: Array, _ctx: GameContext) -> CardRecord:
 	if choose_from_search_proxy.is_valid():
 		return await choose_from_search_proxy.call(candidates)
 	return candidates[0] as CardRecord if not candidates.is_empty() else null
+
+
+func choose_payment_option(options: Array, _ctx: GameContext) -> Variant:
+	if choose_payment_option_proxy.is_valid():
+		return await choose_payment_option_proxy.call(options)
+	# Default: end the run (no proxy set)
+	return null
 
 
 func choose_window_action(ctx: GameContext, actor: String, can_rez_ice: bool) -> GameAction:

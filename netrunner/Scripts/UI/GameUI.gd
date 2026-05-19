@@ -11,6 +11,7 @@ signal mode_choice_resolved(indices: Array)
 signal modal_choice_resolved(indices: Array)
 signal server_choice_resolved(server_id: String)
 signal search_choice_resolved(card: CardRecord)
+signal payment_option_resolved(option: Variant)
 
 # Onready references using unique names (% badge in inspector)
 @onready var resource_label = $MarginContainer/MainContainer/StatePanel/StateVBox/ResourceLabel
@@ -476,6 +477,26 @@ func show_encounter_prompt(encounter: EncounterState) -> Dictionary:
 			)
 			row.add_child(boost_btn)
 
+	# Bioroid click-break — show if ice is a bioroid and runner has clicks
+	if encounter.ice_card != null and encounter.ice_card.card_record != null:
+		if encounter.ice_card.card_record.has_subtype("bioroid") and _ctx.runner_clicks > 0:
+			var bioroid_lbl := Label.new()
+			bioroid_lbl.text = "BIOROID — spend 1 click to break a subroutine:"
+			bioroid_lbl.add_theme_font_size_override("font_size", 10)
+			bioroid_lbl.add_theme_color_override("font_color", Color(0.7, 0.85, 1.0))
+			prompt_box.add_child(bioroid_lbl)
+			for i in range(encounter.subroutines.size()):
+				if encounter.is_broken(i):
+					continue
+				var sub: Dictionary = encounter.subroutines[i] as Dictionary
+				var click_btn := Button.new()
+				click_btn.text = "[1 click] Break: %s" % sub.get("label", "sub %d" % i)
+				var idx := i
+				click_btn.pressed.connect(func():
+					encounter_action_resolved.emit({"type": "break_with_click", "sub_index": idx})
+				)
+				prompt_box.add_child(click_btn)
+
 	# Leech hosted credits — show if any Leech is installed with credits
 	for rig_card in _ctx.runner_rig:
 		var rc: InstalledCard = rig_card as InstalledCard
@@ -626,5 +647,46 @@ func show_search_prompt(candidates: Array) -> CardRecord:
 		prompt_box.add_child(btn)
 
 	var result: CardRecord = await search_choice_resolved
+	prompt_box.queue_free()
+	return result
+
+## Shows a Manegarm Skunkworks payment prompt.
+## Returns the chosen Dictionary option, or null if the runner ends the run.
+func show_payment_option_prompt(options: Array) -> Variant:
+	_append_log("MANEGARM: Choose how to continue the run:")
+
+	var prompt_box := VBoxContainer.new()
+	action_menu.add_child(prompt_box)
+
+	var lbl := Label.new()
+	lbl.text = "Manegarm Skunkworks — pay to continue:"
+	lbl.add_theme_font_size_override("font_size", 11)
+	prompt_box.add_child(lbl)
+
+	for opt in options:
+		var o: Dictionary = opt as Dictionary
+		var btn := Button.new()
+		match o.get("type", ""):
+			"clicks":
+				btn.text = "Spend %d click(s) (%d available)" % [o.get("amount", 0), _ctx.runner_clicks]
+			"credits":
+				btn.text = "Pay %d credits (%d available)" % [o.get("amount", 0), _ctx.runner_credits]
+			_:
+				btn.text = str(o)
+		var captured := o
+		btn.pressed.connect(func():
+			payment_option_resolved.emit(captured)
+		)
+		prompt_box.add_child(btn)
+
+	# Always offer the option to end the run
+	var end_btn := Button.new()
+	end_btn.text = "End the run"
+	end_btn.pressed.connect(func():
+		payment_option_resolved.emit(null)
+	)
+	prompt_box.add_child(end_btn)
+
+	var result: Variant = await payment_option_resolved
 	prompt_box.queue_free()
 	return result
