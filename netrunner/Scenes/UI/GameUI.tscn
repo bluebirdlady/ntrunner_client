@@ -1,0 +1,62 @@
+[gd_scene format=3 uid="uid://cvhiaa7w0u2cw"]
+
+[ext_resource type="Script" uid="uid://c8yy0tgj40etc" path="res://Scripts/UI/GameUI.gd" id="1_13cgw"]
+
+[node name="GameUI" type="CanvasLayer" unique_id=1524405441]
+script = ExtResource("1_13cgw")
+
+[node name="MainContainer" type="HBoxContainer" parent="." unique_id=1941065871]
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+theme_override_constants/separation = 12
+
+[node name="StatePanel" type="PanelContainer" parent="MainContainer" unique_id=1786246283]
+custom_minimum_size = Vector2(400, 0)
+layout_mode = 2
+
+[node name="StateVBox" type="VBoxContainer" parent="MainContainer/StatePanel" unique_id=2033849277]
+layout_mode = 2
+theme_override_constants/separation = 10
+
+[node name="ResourceLabel" type="Label" parent="MainContainer/StatePanel/StateVBox" unique_id=1902224449]
+layout_mode = 2
+text = "=== RESOURCES ===
+CORP   | Credits: 5  | Clicks: 0 | Points: 0
+RUNNER | Credits: 5  | Clicks: 0 | Points: 0 | Tags: 0"
+
+[node name="CorpHandLabel" type="Label" parent="MainContainer/StatePanel/StateVBox" unique_id=55290087]
+layout_mode = 2
+text = "Corp HQ Hand (0 cards):
+  [Empty]"
+
+[node name="RunnerHandLabel" type="Label" parent="MainContainer/StatePanel/StateVBox" unique_id=762618426]
+layout_mode = 2
+text = "Runner Grip (0 cards):
+  [Empty]"
+
+[node name="ServersTree" type="Tree" parent="MainContainer/StatePanel/StateVBox" unique_id=962665062]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_vertical = 3
+hide_root = true
+
+[node name="ControlPanel" type="VBoxContainer" parent="MainContainer" unique_id=1062062139]
+layout_mode = 2
+size_flags_horizontal = 3
+theme_override_constants/separation = 12
+
+[node name="LogText" type="TextEdit" parent="MainContainer/ControlPanel" unique_id=924946009]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_vertical = 3
+editable = false
+wrap_mode = 1
+
+[node name="ActionMenu" type="VBoxContainer" parent="MainContainer/ControlPanel" unique_id=256458130]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(0, 200)
+layout_mode = 2
+theme_override_constants/separation = 6

@@ -1,0 +1,604 @@
+{
+	"hedge_fund": {
+		"on_play": {
+			"effects": [
+				{
+					"type": "gain_credits",
+					"params": {
+						"subject": "corp",
+						"amount": 9
+					}
+				}
+			]
+		}
+	},
+	"palisade": {
+		"subroutines": [
+			{
+				"label": "End the run.",
+				"effects": [
+					{
+						"type": "end_run"
+					}
+				]
+			}
+		]
+	},
+	"whitespace": {
+		"subroutines": [
+			{
+				"label": "The Runner loses 3[credit].",
+				"effects": [
+					{
+						"type": "lose_credits",
+						"params": {
+							"subject": "runner",
+							"amount": 3
+						}
+					}
+				]
+			},
+			{
+				"label": "If the Runner has 6[credit] or fewer, end the run.",
+				"condition": {
+					"type": "credits_compare",
+					"params": {
+						"subject": "runner",
+						"operator": "lte",
+						"value": 6
+					}
+				},
+				"effects": [
+					{
+						"type": "end_run"
+					}
+				]
+			}
+		]
+	},
+	"urtica_cipher": {
+		"on_access": {
+			"effects": [
+				{
+					"type": "deal_damage",
+					"params": {
+						"damage_type": "net",
+						"amount": {
+							"base": 2,
+							"plus_counters": "advancement"
+						}
+					}
+				}
+			]
+		}
+	},
+	"retribution": {
+		"on_play": {
+			"condition": {
+				"type": "runner_is_tagged"
+			},
+			"target": {
+				"type": "installed_card",
+				"params": {
+					"controller": "runner",
+					"card_types": [
+						"program",
+						"hardware"
+					],
+					"count": 1
+				}
+			},
+			"effects": [
+				{
+					"type": "trash_card",
+					"params": {
+						"target": "chosen"
+					}
+				}
+			]
+		}
+	},
+	"cleaver": {
+		"break": {
+			"subtype_restriction": "barrier",
+			"cost_per_sub": 1,
+			"subs_per_use": 1
+		},
+		"boost": {
+			"cost": 1,
+			"strength_gained": 2
+		}
+	},
+	"unity": {
+		"break": {
+			"subtype_restriction": "code_gate",
+			"cost_per_sub": 1,
+			"subs_per_use": 1
+		},
+		"boost": {
+			"cost": 1,
+			"strength_gained": 1,
+			"strength_gained_modifier": "installed_icebreaker_count"
+		}
+	},
+	"carmen": {
+		"break": {
+			"subtype_restriction": "sentry",
+			"cost_per_sub": 1,
+			"subs_per_use": 1
+		},
+		"boost": {
+			"cost": 1,
+			"strength_gained": 2
+		}
+	},
+	"sure_gamble": {
+		"on_play": {
+			"effects": [
+				{
+					"type": "gain_credits",
+					"params": {
+						"subject": "runner",
+						"amount": 9
+					}
+				}
+			]
+		}
+	},
+	"government_subsidy": {
+		"on_play": {
+			"effects": [
+				{
+					"type": "gain_credits",
+					"params": {
+						"subject": "corp",
+						"amount": 14
+					}
+				}
+			]
+		}
+	},
+	"offworld_office": {
+		"on_score": {
+			"effects": [
+				{
+					"type": "gain_credits",
+					"params": {
+						"subject": "corp",
+						"amount": 7
+					}
+				}
+			]
+		}
+	},
+	"luminal_transubstantiation": {
+		"on_score": {
+			"effects": [
+				{
+					"type": "gain_credits",
+					"params": {
+						"subject": "corp",
+						"amount": 2
+					}
+				},
+				{
+					"type": "draw_cards",
+					"params": {
+						"subject": "corp",
+						"amount": 2
+					}
+				}
+			]
+		}
+	},
+	"tithe": {
+		"subroutines": [
+			{
+				"label": "The Runner loses 1[credit].",
+				"effects": [
+					{
+						"type": "lose_credits",
+						"params": {
+							"subject": "runner",
+							"amount": 1
+						}
+					}
+				]
+			},
+			{
+				"label": "End the run.",
+				"effects": [
+					{
+						"type": "end_run"
+					}
+				]
+			}
+		]
+	},
+	"creative_commission": {
+		"on_play": {
+			"effects": [
+				{
+					"type": "gain_credits",
+					"params": {
+						"subject": "runner",
+						"amount": 5
+					}
+				},
+				{
+					"type": "lose_clicks_next_turn",
+					"params": {
+						"subject": "runner",
+						"amount": 1
+					}
+				}
+			]
+		}
+	},
+	"vrcation": {
+		"on_play": {
+			"effects": [
+				{
+					"type": "draw_cards",
+					"params": {
+						"subject": "runner",
+						"amount": 4
+					}
+				},
+				{
+					"type": "lose_clicks_next_turn",
+					"params": {
+						"subject": "runner",
+						"amount": 1
+					}
+				}
+			]
+		}
+	},
+	"sprint": {
+		"on_play": {
+			"effects": [
+				{
+					"type": "draw_cards",
+					"params": {
+						"subject": "corp",
+						"amount": 3
+					}
+				},
+				{
+					"type": "choose_and_return_to_deck",
+					"params": {
+						"subject": "corp"
+					}
+				}
+			]
+		}
+	},
+	"seamless_launch": {
+		"on_play": {
+			"target": {
+				"type": "installed_card",
+				"params": {
+					"controller": "corp",
+					"card_types": [
+						"agenda",
+						"asset",
+						"ice",
+						"upgrade"
+					],
+					"count": 1
+				}
+			},
+			"effects": [
+				{
+					"type": "add_counters_to_target",
+					"params": {
+						"counter_type": "advancement",
+						"amount": 2
+					}
+				}
+			]
+		}
+	},
+	"predictive_planogram": {
+		"on_play": {
+			"modes": [
+				{
+					"label": "Gain 3 credits",
+					"effects": [
+						{
+							"type": "gain_credits",
+							"params": {
+								"subject": "corp",
+								"amount": 3
+							}
+						}
+					]
+				},
+				{
+					"label": "Draw 3 cards",
+					"effects": [
+						{
+							"type": "draw_cards",
+							"params": {
+								"subject": "corp",
+								"amount": 3
+							}
+						}
+					]
+				}
+			],
+			"max_choices": 1,
+			"bonus_condition": {
+				"type": "runner_is_tagged"
+			}
+		}
+	},
+	"nico_campaign": {
+		"on_rez": {
+			"effects": [
+				{
+					"type": "add_self_counters",
+					"counter": "credits",
+					"amount": 8
+				}
+			]
+		},
+		"corp_turn_start": {
+			"effects": [
+				{
+					"type": "take_hosted_credits",
+					"subject": "corp",
+					"amount": 2
+				},
+				{
+					"type": "self_trash_if_empty",
+					"counter": "credits"
+				}
+			]
+		}
+	},
+	"daily_casts": {
+		"on_rez": {
+			"effects": [
+				{
+					"type": "add_self_counters",
+					"counter": "credits",
+					"amount": 8
+				}
+			]
+		},
+		"runner_turn_start": {
+			"effects": [
+				{
+					"type": "take_hosted_credits",
+					"subject": "runner",
+					"amount": 2
+				},
+				{
+					"type": "self_trash_if_empty",
+					"counter": "credits"
+				}
+			]
+		}
+	},
+	"earthrise_hotel": {
+		"on_rez": {
+			"effects": [
+				{
+					"type": "add_self_counters",
+					"counter": "power",
+					"amount": 3
+				}
+			]
+		},
+		"runner_turn_start": {
+			"effects": [
+				{
+					"type": "draw_cards",
+					"params": {
+						"subject": "runner",
+						"amount": 2
+					}
+				},
+				{
+					"type": "remove_self_counter",
+					"counter": "power",
+					"amount": 1
+				},
+				{
+					"type": "self_trash_if_empty",
+					"counter": "power"
+				}
+			]
+		}
+	},
+	"superconducting_hub": {
+		"on_score": {
+			"effects": [
+				{
+					"type": "increase_hand_size",
+					"params": {
+						"subject": "corp",
+						"amount": 2
+					}
+				},
+				{
+					"type": "draw_cards",
+					"params": {
+						"subject": "corp",
+						"amount": 2
+					}
+				}
+			]
+		},
+		"on_steal": {
+			"effects": [
+				{
+					"type": "draw_cards",
+					"params": {
+						"subject": "runner",
+						"amount": 2
+					}
+				}
+			]
+		}
+	},
+	"send_a_message": {
+		"on_score": {
+			"effects": [
+				{
+					"type": "rez_card_free",
+					"params": {
+						"target_zone": "ice"
+					}
+				}
+			]
+		},
+		"on_steal": {
+			"effects": [
+				{
+					"type": "gain_credits",
+					"params": {
+						"subject": "runner",
+						"amount": 2
+					}
+				}
+			]
+		}
+	},
+	"jailbreak": {
+		"on_play": {
+			"effects": [
+				{
+					"type": "set_run_modifier",
+					"params": {
+						"key": "bonus_access",
+						"value": 1
+					}
+				},
+				{
+					"type": "choose_and_run",
+					"params": {
+						"servers": [
+							"hq",
+							"rd"
+						]
+					}
+				}
+			]
+		}
+	},
+	"overclock": {
+		"on_play": {
+			"effects": [
+				{
+					"type": "set_run_modifier",
+					"params": {
+						"key": "icebreaker_credits",
+						"value": 5
+					}
+				},
+				{
+					"type": "choose_and_run",
+					"params": {
+						"servers": [
+							"hq",
+							"rd",
+							"archives"
+						]
+					}
+				}
+			]
+		}
+	},
+	"tread_lightly": {
+		"on_play": {
+			"effects": [
+				{
+					"type": "set_run_modifier",
+					"params": {
+						"key": "extra_rez_cost",
+						"value": 3
+					}
+				},
+				{
+					"type": "choose_and_run",
+					"params": {
+						"servers": [
+							"hq",
+							"rd",
+							"archives"
+						]
+					}
+				}
+			]
+		}
+	},
+	"k2cp_turbine": {
+		"passive_modifiers": [
+			{
+				"type": "breaker_strength",
+				"value": 2,
+				"conditions": {}
+			}
+		]
+	},
+	"mutual_favor": {
+		"on_play": {
+			"effects": [
+				{
+					"type": "search_deck",
+					"params": {
+						"subject": "runner",
+						"subtypes": [
+							"fracter",
+							"decoder",
+							"killer"
+						],
+						"reveal": true
+					}
+				}
+			]
+		}
+	},
+	"conduit": {
+		"successful_run": {
+			"effects": [
+				{
+					"type": "add_self_counter_if_server",
+					"counter": "virus",
+					"amount": 1,
+					"params": {
+						"server": "rd"
+					}
+				},
+				{
+					"type": "set_bonus_access_from_counters",
+					"counter": "virus",
+					"params": {}
+				}
+			]
+		}
+	},
+	"leech": {
+		"on_rez": {
+			"effects": [
+				{
+					"type": "add_self_counters",
+					"counter": "credits",
+					"amount": 1
+				}
+			]
+		},
+		"encounter_ice": {
+			"effects": [
+				{
+					"type": "add_self_counters",
+					"counter": "credits",
+					"amount": 1
+				}
+			]
+		}
+	}
+}
