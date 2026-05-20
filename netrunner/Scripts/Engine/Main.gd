@@ -34,7 +34,7 @@ func _ready() -> void:
 	run_machine  = RunStateMachine.new(ctx, ability_registry)
 	ctx.set_meta("run_state_machine", run_machine)
 
-	game_ui.setup(ctx, turn_manager, run_machine)
+	game_ui.setup(ctx, turn_manager, run_machine, ability_registry)
 
 	# Route UI actions to the runner brain
 	game_ui.action_requested.connect(func(action: GameAction):
@@ -146,42 +146,48 @@ func _populate_test_state() -> void:
 	ctx.corp_clicks    = 3
 	ctx.runner_clicks  = 0
 
+	# ── Identities ────────────────────────────────────────────────────────────
+	ctx.corp_identity   = CardRegistry.get_card("the_syndicate_profit_over_principle")
+	ctx.runner_identity = CardRegistry.get_card("the_catalyst_convention_breaker")
+
+	# ── System Gateway Starter Corp deck (34 cards — The Syndicate) ───────────
 	var corp_deck_ids: Array = [
-		"luminal_transubstantiation",
 		"offworld_office", "offworld_office", "offworld_office",
-		"send_a_message", "send_a_message", "send_a_message",
-		"superconducting_hub",
-		"nico_campaign", "nico_campaign", "nico_campaign",
-		"urtica_cipher", "urtica_cipher", "urtica_cipher",
-		"government_subsidy", "government_subsidy", "government_subsidy",
+		"send_a_message", "send_a_message",
+		"superconducting_hub", "superconducting_hub",
+		"nico_campaign", "nico_campaign",
+		"urtica_cipher", "urtica_cipher",
+		"regolith_mining_license", "regolith_mining_license",
 		"hedge_fund", "hedge_fund", "hedge_fund",
-		"predictive_planogram", "predictive_planogram", "predictive_planogram",
+		"government_subsidy", "government_subsidy",
 		"seamless_launch", "seamless_launch",
-		"sprint", "sprint",
-		"manegarm_skunkworks", "manegarm_skunkworks",
+		"manegarm_skunkworks",
 		"bran_1_0", "bran_1_0",
+		"diviner", "diviner",
+		"karuna", "karuna",
 		"palisade", "palisade", "palisade",
-		"whitespace", "whitespace", "whitespace",
-		"ansel_1_0", "ansel_1_0", "ansel_1_0",
-		"tithe", "tithe", "tithe",
+		"whitespace", "whitespace",
+		"tithe", "tithe",
 	]
 
+	# ── System Gateway Starter Runner deck (30 cards — The Catalyst) ──────────
 	var runner_deck_ids: Array = [
+		"tread_lightly", "tread_lightly",
+		"creative_commission", "creative_commission",
+		"vrcation", "vrcation",
+		"overclock", "overclock",
 		"jailbreak", "jailbreak", "jailbreak",
-		"mutual_favor", "mutual_favor",
-		"overclock", "overclock", "overclock",
 		"sure_gamble", "sure_gamble", "sure_gamble",
-		"tread_lightly", "tread_lightly", "tread_lightly",
-		"vrcation", "vrcation", "vrcation",
-		"conduit", "conduit", "conduit",
-		"k2cp_turbine", "k2cp_turbine", "k2cp_turbine",
-		"cleaver", "cleaver", "cleaver",
-		"unity", "unity", "unity",
-		"carmen", "carmen", "carmen",
-		"leech", "leech", "leech",
-		"daily_casts", "daily_casts", "daily_casts",
-		"earthrise_hotel", "earthrise_hotel", "earthrise_hotel",
-		"creative_commission", "creative_commission", "creative_commission",
+		"docklands_pass",
+		"pennyshaver",
+		"red_team",
+		"telework_contract", "telework_contract",
+		"smartware_distributor", "smartware_distributor",
+		"verbal_plasticity",
+		"cleaver", "cleaver",
+		"carmen", "carmen",
+		"unity", "unity",
+		"mayfly", "mayfly",
 	]
 
 	_load_deck_from_ids(corp_deck_ids, ctx.corp_deck)

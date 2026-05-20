@@ -31,6 +31,7 @@ var run_machine:      RunStateMachine
 # ── State ─────────────────────────────────────────────────────────────────────
 var _current_server:  Server = null
 var _current_ice:     InstalledCard = null
+var _access_overlay:  Control = null
 
 # ── Node references (built programmatically) ──────────────────────────────────
 var _phase_label:     Label
@@ -58,10 +59,15 @@ func setup(game_ctx: GameContext, ab_registry: AbilityRegistry, rsm: RunStateMac
 	run_machine.subroutine_broken.connect(_on_subroutine_broken)
 	run_machine.run_succeeded.connect(_on_run_succeeded)
 	run_machine.run_ended_unsuccessfully.connect(_on_run_ended)
+	run_machine.card_accessed.connect(_on_card_accessed)
 	if run_machine.has_signal("encounter_started"):
 		run_machine.encounter_started.connect(_on_encounter_started)
 	if run_machine.has_signal("encounter_updated"):
 		run_machine.encounter_updated.connect(_on_encounter_updated)
+
+	# Register async display callback so the engine waits for each card
+	# to be shown before proceeding to the next access or phase end.
+	ctx.set_meta("on_card_display_done", Callable(self, "_display_accessed_card"))
 
 
 func start_run(server_id: String) -> void:
@@ -100,8 +106,9 @@ func _build_ui() -> void:
 
 	# ── Left: server column ───────────────────────────────────────────────────
 	var server_panel := PanelContainer.new()
-	server_panel.custom_minimum_size = Vector2(220, 0)
+	server_panel.custom_minimum_size = Vector2(200, 0)
 	server_panel.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	server_panel.clip_contents = false
 	hbox.add_child(server_panel)
 
 	var server_vbox := VBoxContainer.new()
@@ -114,15 +121,23 @@ func _build_ui() -> void:
 	server_title.add_theme_color_override("font_color", Color(0.5, 0.5, 0.6))
 	server_vbox.add_child(server_title)
 
+	# Scroll container so many ice cards don't squish vertically
+	var server_scroll := ScrollContainer.new()
+	server_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	server_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	server_scroll.clip_contents = false   # allow hovered cards to overflow
+	server_vbox.add_child(server_scroll)
+
 	_server_col = VBoxContainer.new()
 	_server_col.add_theme_constant_override("separation", 6)
-	_server_col.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	server_vbox.add_child(_server_col)
+	_server_col.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	server_scroll.add_child(_server_col)
 
 	# ── Centre: runner rig ────────────────────────────────────────────────────
 	var rig_panel := PanelContainer.new()
 	rig_panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	rig_panel.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	rig_panel.clip_contents = false
 	hbox.add_child(rig_panel)
 
 	var rig_vbox := VBoxContainer.new()
@@ -161,6 +176,7 @@ func _build_ui() -> void:
 	var rig_scroll := ScrollContainer.new()
 	rig_scroll.custom_minimum_size = Vector2(0, 180)
 	rig_scroll.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	rig_scroll.clip_contents = false   # allow hovered cards to overflow
 	rig_vbox.add_child(rig_scroll)
 
 	_rig_row = HBoxContainer.new()
@@ -237,8 +253,9 @@ func _rebuild_server_column() -> void:
 		for ice in _current_server.ice:
 			var c: InstalledCard = ice as InstalledCard
 			var card_view := CardView.new()
+			card_view.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
 			_server_col.add_child(card_view)
-			card_view.setup(c.card_record if c.is_rezzed else null, c.is_rezzed)
+			card_view.setup(c.card_record, c.is_rezzed)
 			_ice_cards.append(card_view)
 
 	# Root
@@ -251,6 +268,7 @@ func _rebuild_server_column() -> void:
 		for root_card in _current_server.root:
 			var c: InstalledCard = root_card as InstalledCard
 			var card_view := CardView.new()
+			card_view.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
 			_server_col.add_child(card_view)
 			card_view.setup(c.card_record, c.is_rezzed)
 
@@ -368,6 +386,9 @@ func _on_phase_changed(phase: RunStateMachine.Phase) -> void:
 	_clear_actions()
 	# Fire run_complete after a brief display pause when the run fully ends
 	if phase == RunStateMachine.Phase.END:
+		# Remove the display callback so it doesn't reference this freed scene
+		if ctx.has_meta("on_card_display_done"):
+			ctx.remove_meta("on_card_display_done")
 		await get_tree().create_timer(0.8).timeout
 		run_complete.emit()
 
@@ -422,6 +443,115 @@ func _on_run_ended(_reason: String) -> void:
 	_update_resources()
 
 
+# ── Access result display ────────────────────────────────────────────────────
+
+# Called by the signal handler — kept for logging/minor side effects only.
+# The engine now drives display sequencing via _display_accessed_card.
+func _on_card_accessed(card_record: CardRecord, outcome: String) -> void:
+	_log("📋 Accessed: %s [%s]" % [card_record.title if card_record else "?", outcome])
+
+
+# Awaitable callback registered on ctx as "on_card_display_done".
+# RunStateMachine calls this after each card_accessed signal and awaits it,
+# so the engine pauses until the player has seen the card.
+func _display_accessed_card(card_record: CardRecord, outcome: String) -> void:
+	await _show_access_result(card_record, outcome)
+
+
+func _show_access_result(card_record: CardRecord, outcome: String) -> void:
+	# Build full-screen access overlay
+	if _access_overlay != null:
+		_access_overlay.queue_free()
+
+	_access_overlay = Control.new()
+	_access_overlay.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_access_overlay.mouse_filter = Control.MOUSE_FILTER_STOP
+	add_child(_access_overlay)
+
+	# Dark background
+	var bg := ColorRect.new()
+	bg.set_anchors_preset(Control.PRESET_FULL_RECT)
+	bg.color = Color(0.0, 0.0, 0.0, 0.75)
+	_access_overlay.add_child(bg)
+
+	# Centre column
+	var col := VBoxContainer.new()
+	col.set_anchors_preset(Control.PRESET_CENTER)
+	col.offset_left   = -160
+	col.offset_right  = 160
+	col.offset_top    = -260
+	col.offset_bottom = 260
+	col.alignment     = BoxContainer.ALIGNMENT_CENTER
+	col.add_theme_constant_override("separation", 16)
+	_access_overlay.add_child(col)
+
+	# Outcome banner
+	var outcome_colors := {
+		"stolen":   Color(0.95, 0.8,  0.2),
+		"trashed":  Color(0.9,  0.3,  0.3),
+		"accessed": Color(0.6,  0.85, 1.0),
+	}
+	var banner := Label.new()
+	var outcome_upper := outcome.to_upper()
+	banner.text = outcome_upper
+	banner.add_theme_font_size_override("font_size", 28)
+	banner.add_theme_color_override("font_color",
+		outcome_colors.get(outcome, Color(0.8, 0.8, 0.8)))
+	banner.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	col.add_child(banner)
+
+	# Card image
+	if card_record != null:
+		var card_view := CardView.new()
+		col.add_child(card_view)
+		card_view.setup(card_record, true)
+		# Scale up the card view for readability
+		card_view.scale = Vector2(1.6, 1.6)
+		# Centre-align within column
+		card_view.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+
+		# Card title and type below
+		var title_lbl := Label.new()
+		title_lbl.text = card_record.title
+		title_lbl.add_theme_font_size_override("font_size", 16)
+		title_lbl.add_theme_color_override("font_color", Color(0.95, 0.95, 0.95))
+		title_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		col.add_child(title_lbl)
+
+		if card_record.is_agenda():
+			var pts_lbl := Label.new()
+			pts_lbl.text = "%d agenda point(s)" % card_record.agenda_points
+			pts_lbl.add_theme_font_size_override("font_size", 13)
+			pts_lbl.add_theme_color_override("font_color",
+				outcome_colors.get(outcome, Color(0.8, 0.8, 0.8)))
+			pts_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+			col.add_child(pts_lbl)
+	else:
+		var unknown_lbl := Label.new()
+		unknown_lbl.text = "(card)"
+		unknown_lbl.add_theme_font_size_override("font_size", 14)
+		unknown_lbl.add_theme_color_override("font_color", Color(0.6, 0.6, 0.6))
+		unknown_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		col.add_child(unknown_lbl)
+
+	# Dismiss button or auto-dismiss
+	var is_agenda := card_record != null and card_record.is_agenda()
+	if is_agenda:
+		# Agendas wait for explicit dismiss — they're important
+		var dismiss_btn := Button.new()
+		dismiss_btn.text = "Continue"
+		dismiss_btn.add_theme_font_size_override("font_size", 14)
+		col.add_child(dismiss_btn)
+		await dismiss_btn.pressed
+	else:
+		# Non-agendas auto-dismiss after a pause long enough to read the card
+		await get_tree().create_timer(3.0).timeout
+
+	if _access_overlay != null:
+		_access_overlay.queue_free()
+		_access_overlay = null
+
+
 # ── Decision maker methods (proxies point here during run) ────────────────────
 
 func show_encounter_prompt(encounter: EncounterState) -> Dictionary:
@@ -441,7 +571,7 @@ func show_encounter_prompt(encounter: EncounterState) -> Dictionary:
 		lbl.text = broken_marker + sub.get("label", "sub %d" % i)
 		lbl.add_theme_font_size_override("font_size", 10)
 		lbl.add_theme_color_override("font_color", color)
-		lbl.autowrap_mode = TextServer.AUTOWRAP_WORD
+		lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 		_action_area.add_child(lbl)
 
 	# Bioroid click-break

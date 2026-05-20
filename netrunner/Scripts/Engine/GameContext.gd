@@ -18,6 +18,10 @@ var corp_bad_pub:   int = 0
 var corp_clicks:    int = 0
 var runner_clicks:  int = 0
 
+# ── Decision-makers────────────────────────────────────────────────────────────
+var corp_decision_maker: Object = null
+var runner_decision_maker: Object = null
+
 # ── Hands ─────────────────────────────────────────────────────────────────────
 # Each entry: {"card_id": String, "card_record": CardRecord}
 var corp_hand:   Array = []
@@ -28,6 +32,10 @@ var corp_deck: Array[CardRecord] = []
 var runner_deck: Array[CardRecord] = []
 var corp_discard: Array[CardRecord] = []
 var runner_discard: Array[CardRecord] = []
+# Cards in Archives that were installed unrezzed when trashed — facedown until accessed.
+var corp_discard_facedown: Dictionary = {}
+# Instance IDs of cards the Corp installed this turn (for Seamless Launch restriction)
+var corp_installed_this_turn: Array = []
 
 # ── Score areas ───────────────────────────────────────────────────────────────
 var corp_score_area: Array[CardRecord] = []
@@ -50,6 +58,18 @@ var run_ended:          bool   = false
 var run_successful:     bool   = false
 var run_target_server:  String = ""
 var accessed_card_id:   String = ""
+# Tracks whether the runner has made a successful run this turn.
+# Used by conditional install costs (e.g. Carmen: costs 3 instead of 5).
+# Cleared at the start of each runner turn.
+var runner_made_successful_run_this_turn: bool = false
+# Tracks which central server IDs the runner has already attempted this turn.
+# Used by Red Team to enforce "a central you have not already run this turn".
+# Cleared at the start of each runner turn.
+var runner_centrals_run_this_turn: Array = []
+# Tracks how many times the runner has used click-draw this turn (for Verbal Plasticity)
+var runner_click_draws_this_turn: int = 0
+# Tracks which cards have already fired their "first HQ breach" bonus this turn (Docklands Pass)
+var runner_hq_breached_this_turn: bool = false
 # Run modifiers: set by run-initiating events, cleared when the run ends.
 # Supported keys:
 #   "extra_rez_cost"    : int — Corp pays extra to rez ice (Tread Lightly)
@@ -71,9 +91,66 @@ var active_player: String = "corp"
 var game_over:     bool   = false
 var winner:        String = ""
 
-# ── Decision makers ───────────────────────────────────────────────────────────
-var corp_decision_maker:   Object = null
-var runner_decision_maker: Object = null
+# ── Identities ────────────────────────────────────────────────────────────────
+var corp_identity:   CardRecord = null
+var runner_identity: CardRecord = null
+
+# Convenience helpers — return the short name from the identity title,
+# or a generic fallback if no identity is set.
+# Identity titles are typically "Faction: Short Name", e.g.
+# "Haas-Bioroid: Precision Design" → "Precision Design"
+# "The Catalyst: Convention Breaker" → "The Catalyst"
+func corp_name() -> String:
+	if corp_identity == null:
+		return "Corp"
+	var title: String = corp_identity.title
+	var colon: int = title.find(": ")
+	return title.substr(colon + 2) if colon >= 0 else title
+
+func runner_name() -> String:
+	if runner_identity == null:
+		return "Runner"
+	var title: String = runner_identity.title
+	var colon: int = title.find(": ")
+	return title.substr(colon + 2) if colon >= 0 else title
+
+func player_name(player: String) -> String:
+	return corp_name() if player == "corp" else runner_name()
+
+# ── Memory Unit tracking ───────────────────────────────────────────────────────
+
+# Base MU from runner identity (default 4 per rules if identity has none set)
+func runner_base_mu() -> int:
+	if runner_identity != null and runner_identity.memory_limit > 0:
+		return runner_identity.memory_limit
+	return 4   # default per rules
+
+# Additional MU granted by installed hardware/resources (e.g. Pennyshaver +1)
+func runner_mu_bonus() -> int:
+	var bonus := 0
+	for mod in _state_modifiers.get("mu_bonus", []):
+		bonus += (mod as Dictionary).get("value", 0) as int
+	return bonus
+
+# Total MU the runner has available
+func runner_total_mu() -> int:
+	return runner_base_mu() + runner_mu_bonus()
+
+# MU currently consumed by installed programs
+func runner_mu_used() -> int:
+	var used := 0
+	for card in runner_rig:
+		var c: InstalledCard = card as InstalledCard
+		if c != null and c.card_record != null and c.card_record.memory_cost > 0:
+			used += c.card_record.memory_cost
+	return used
+
+# MU still available for programs
+func runner_mu_available() -> int:
+	return runner_total_mu() - runner_mu_used()
+
+# Set by TurnManager at game start based on identities (6 for starters, 7 otherwise)
+var agenda_points_to_win: int = 7
 
 # ── Event log ─────────────────────────────────────────────────────────────────
 var event_log: Array = []
@@ -96,6 +173,10 @@ func _init() -> void:
 
 func get_server(server_id: String) -> Server:
 	return servers.get(server_id, null)
+
+func remove_meta_if_exists(key: String) -> void:
+	if has_meta(key):
+		remove_meta(key)
 
 func create_remote_server() -> Server:
 	var idx := 0
@@ -335,6 +416,23 @@ func get_credits(subject: String) -> int:
 		"runner": return runner_credits
 	push_error("GameContext: unknown subject '%s'" % subject)
 	return 0
+
+# Total credits available to the runner including any Overclock pool
+func runner_available_credits() -> int:
+	return runner_credits + run_modifiers.get("overclock_credits", 0)
+
+# Spend runner credits, drawing from Overclock pool first, then own pool.
+# Returns false if insufficient total credits.
+func runner_spend_credits(amount: int) -> bool:
+	var overclock: int = run_modifiers.get("overclock_credits", 0)
+	var total: int     = runner_credits + overclock
+	if total < amount:
+		return false
+	var from_overclock: int = min(amount, overclock)
+	var from_own: int       = amount - from_overclock
+	run_modifiers["overclock_credits"] = overclock - from_overclock
+	runner_credits -= from_own
+	return true
 
 func set_credits(subject: String, amount: int) -> void:
 	match subject:

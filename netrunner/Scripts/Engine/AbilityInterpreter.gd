@@ -118,6 +118,7 @@ func _resolve_target(target_spec: Dictionary, ctx: GameContext) -> Variant:
 		"installed_card":
 			var controller: String = params.get("controller", "")
 			var card_types: Array  = params.get("card_types", []) as Array
+			var exclude_installed_this_turn: bool = params.get("exclude_installed_this_turn", false)
 			var pool: Array = []
 			if controller == "runner" or controller == "":
 				pool.append_array(ctx.runner_rig)
@@ -125,7 +126,9 @@ func _resolve_target(target_spec: Dictionary, ctx: GameContext) -> Variant:
 				pool.append_array(ctx.all_installed())
 			candidates = pool.filter(func(c: InstalledCard):
 				var type_match: bool = card_types.is_empty() or card_types.has(c.card_record.card_type)
-				return type_match
+				var turn_ok: bool = not exclude_installed_this_turn or \
+					not ctx.corp_installed_this_turn.has(c.card_id)
+				return type_match and turn_ok
 			)
 		_:
 			push_error("AbilityInterpreter: unknown target type '%s'" % ttype)
@@ -163,7 +166,7 @@ func _execute_effect(effect: Dictionary, ctx: GameContext, chosen_target: Varian
 			var subject: String = params.get("subject", "corp")
 			var amount: int     = params.get("amount", 0)
 			ctx.set_credits(subject, ctx.get_credits(subject) + amount)
-			ctx.log("%s gains %d credits." % [subject.capitalize(), amount])
+			ctx.log("%s gains %d credits." % [ctx.player_name(subject), amount])
 
 		"lose_credits":
 			var subject: String = params.get("subject", "runner")
@@ -171,7 +174,7 @@ func _execute_effect(effect: Dictionary, ctx: GameContext, chosen_target: Varian
 			var current: int    = ctx.get_credits(subject)
 			var lost: int       = min(amount, current)  # can't go below 0
 			ctx.set_credits(subject, current - lost)
-			ctx.log("%s loses %d credits." % [subject.capitalize(), lost])
+			ctx.log("%s loses %d credits." % [ctx.player_name(subject), lost])
 
 		"end_run":
 			ctx.run_ended = true
@@ -182,6 +185,38 @@ func _execute_effect(effect: Dictionary, ctx: GameContext, chosen_target: Varian
 			var amount_def          = params.get("amount", 0)
 			var amount: int         = _resolve_amount(amount_def, ctx)
 			_deal_damage(damage_type, amount, ctx)
+
+		"deal_damage_etr_if_odd_cost":
+			# Diviner: do N net damage; if the trashed card has an odd printed cost, end the run.
+			var damage_type: String = params.get("damage_type", "net")
+			var amount: int         = _resolve_amount(params.get("amount", 1), ctx)
+			var trashed_cards: Array = _deal_damage(damage_type, amount, ctx)
+			if not ctx.game_over and not trashed_cards.is_empty():
+				var first: CardRecord = trashed_cards[0] as CardRecord
+				if first != null:
+					var printed_cost: int = max(0, first.cost)
+					if printed_cost % 2 != 0:
+						ctx.log("Diviner: %s has odd cost (%d) — run ends." % [first.title, printed_cost])
+						ctx.run_ended = true
+					else:
+						ctx.log("Diviner: %s has even cost (%d) — run continues." % [first.title, printed_cost])
+
+		"deal_damage_then_may_jack_out":
+			# Karunā sub 1: do 2 net damage, then the Runner may jack out.
+			# If they jack out, sub 2 (end the run) does not resolve even if unbroken.
+			var damage_type: String = params.get("damage_type", "net")
+			var amount: int         = _resolve_amount(params.get("amount", 2), ctx)
+			_deal_damage(damage_type, amount, ctx)
+			if not ctx.game_over:
+				# Offer jack-out window to the runner
+				var did_jack_out := false
+				if ctx.runner_decision_maker != null and ctx.runner_decision_maker.has_method("choose_jack_out"):
+					did_jack_out = await ctx.runner_decision_maker.choose_jack_out(ctx)
+				if did_jack_out:
+					ctx.log("%s jacks out after Karunā damage." % ctx.runner_name())
+					ctx.run_ended = true
+					# Mark that the runner chose to jack out so sub 2 is skipped
+					ctx.set_meta("karuna_runner_jacked_out", true)
 
 		"draw_cards":
 			var subject: String = params.get("subject", "runner")
@@ -208,7 +243,7 @@ func _execute_effect(effect: Dictionary, ctx: GameContext, chosen_target: Varian
 							affordable.append(o)
 
 			if affordable.is_empty():
-				ctx.log("Runner cannot afford any payment option — run ends.")
+				ctx.log("%s cannot afford any payment option — run ends." % ctx.runner_name())
 				ctx.run_ended = true
 				return
 
@@ -221,7 +256,7 @@ func _execute_effect(effect: Dictionary, ctx: GameContext, chosen_target: Varian
 				chosen = null  # no decision maker — end run
 
 			if chosen == null:
-				ctx.log("Runner ends the run (Manegarm Skunkworks).")
+				ctx.log("%s ends the run (Manegarm Skunkworks)." % ctx.runner_name())
 				ctx.run_ended = true
 				return
 
@@ -231,11 +266,11 @@ func _execute_effect(effect: Dictionary, ctx: GameContext, chosen_target: Varian
 				"clicks":
 					var amount: int = c.get("amount", 0)
 					ctx.runner_clicks -= amount
-					ctx.log("Runner spends %d click(s) for Manegarm Skunkworks." % amount)
+					ctx.log("%s spends %d click(s) for Manegarm Skunkworks." % [ctx.runner_name(), amount])
 				"credits":
 					var amount: int = c.get("amount", 0)
 					ctx.runner_credits -= amount
-					ctx.log("Runner pays %d cr for Manegarm Skunkworks." % amount)
+					ctx.log("%s pays %d cr for Manegarm Skunkworks." % [ctx.runner_name(), amount])
 
 		"install_ice_from_hq":
 			# Corp chooses an ice from HQ (or Archives if allowed) and installs it
@@ -253,7 +288,7 @@ func _execute_effect(effect: Dictionary, ctx: GameContext, chosen_target: Varian
 					if record != null and record.is_ice():
 						candidates.append({"card_id": record.id, "card_record": record, "_from_archives": true})
 			if candidates.is_empty():
-				ctx.log("Corp has no ice in HQ%s to install." % (" or Archives" if also_archives else ""))
+				ctx.log("%s has no ice in HQ%s to install." % [ctx.corp_name(), " or Archives" if also_archives else ""])
 			else:
 				var dm: Object = ctx.corp_decision_maker
 				var chosen_entry: Variant = null
@@ -272,7 +307,7 @@ func _execute_effect(effect: Dictionary, ctx: GameContext, chosen_target: Varian
 						if server != null:
 							var installed := InstalledCard.make_runtime_instance(record, ctx.run_target_server, "ice", false)
 							server.install_ice(installed)
-							ctx.log("Corp installs %s from %s on %s (ignoring costs)." % [
+							ctx.log("%s installs %s from %s on %s (ignoring costs)." % [ctx.corp_name(), 
 								record.title,
 								"Archives" if (chosen_entry as Dictionary).get("_from_archives", false) else "HQ",
 								server.display_name()
@@ -295,7 +330,7 @@ func _execute_effect(effect: Dictionary, ctx: GameContext, chosen_target: Varian
 				return type_match and sub_match
 			)
 			if pool.is_empty():
-				ctx.log("No valid runner cards to trash.")
+				ctx.log("No valid %s cards to trash." % ctx.runner_name())
 			else:
 				var dm: Object = ctx.corp_decision_maker
 				var target: InstalledCard = null
@@ -306,7 +341,7 @@ func _execute_effect(effect: Dictionary, ctx: GameContext, chosen_target: Varian
 				if target != null:
 					ctx.runner_rig.erase(target)
 					ctx.unregister_all_card_effects(target.runtime_instance_id)
-					ctx.log("Corp trashes runner\'s %s." % target.display_name())
+					ctx.log("%s trashes %s's %s." % [ctx.corp_name(), ctx.runner_name(), target.display_name()])
 
 		"search_deck":
 			# Search deck for cards matching a condition, let player choose one,
@@ -348,12 +383,12 @@ func _execute_effect(effect: Dictionary, ctx: GameContext, chosen_target: Varian
 					deck.erase(chosen)
 					hand.append({"card_id": chosen.id, "card_record": chosen})
 					if reveal:
-						ctx.log("%s reveals and takes %s from their deck." % [subject.capitalize(), chosen.title])
+						ctx.log("%s reveals and takes %s from their deck." % [ctx.player_name(subject), chosen.title])
 					else:
-						ctx.log("%s takes a card from their deck." % subject.capitalize())
+						ctx.log("%s takes a card from their deck." % ctx.player_name(subject))
 					# Shuffle the deck after searching
 					deck.shuffle()
-					ctx.log("%s's deck is shuffled." % subject.capitalize())
+					ctx.log("%s's deck is shuffled." % ctx.player_name(subject))
 
 		"choose_and_return_to_deck":
 			# Ask the active player to choose a card from their hand to shuffle back.
@@ -375,7 +410,7 @@ func _execute_effect(effect: Dictionary, ctx: GameContext, chosen_target: Varian
 					deck.insert(insert_pos, (chosen_entry as Dictionary).get("card_record", null))
 					var r: CardRecord = (chosen_entry as Dictionary).get("card_record", null)
 					ctx.log("%s shuffles %s back into their deck." % [
-						subject.capitalize(),
+						ctx.player_name(subject),
 						r.title if r else "a card"
 					])
 
@@ -422,6 +457,61 @@ func _execute_effect(effect: Dictionary, ctx: GameContext, chosen_target: Varian
 				return
 			await rsm.execute(chosen)
 
+		"run_central_if_unrun":
+			# Red Team: spend a click to run a central not yet run this turn.
+			# If successful, take payout_amount credits from this card's hosted pool.
+			var payout_counter: String = params.get("payout_counter", "credits")
+			var payout_amount: int     = params.get("payout_amount", 3)
+
+			# Build list of eligible centrals (not yet run this turn, has credits)
+			var iid: String         = ctx.current_event_data.get("card_instance_id", "")
+			var self_card: InstalledCard = ctx.get_installed_card_by_instance_id(iid)
+			if self_card == null or self_card.get_counter(payout_counter) <= 0:
+				ctx.log("Red Team: no credits remaining — cannot use.")
+				return
+
+			var all_centrals: Array = ["hq", "rd", "archives"]
+			var eligible: Array = []
+			for srv in all_centrals:
+				if srv not in ctx.runner_centrals_run_this_turn:
+					eligible.append(srv)
+
+			if eligible.is_empty():
+				ctx.log("Red Team: all central servers already run this turn.")
+				return
+
+			# Ask runner to choose which central to run
+			var chosen: String = eligible[0]
+			if ctx.runner_decision_maker != null and ctx.runner_decision_maker.has_method("choose_server"):
+				chosen = await ctx.runner_decision_maker.choose_server(eligible, ctx)
+
+			ctx.log("Red Team: %s runs %s." % [ctx.runner_name(), chosen.to_upper()])
+
+			# Register a one-shot successful_run hook to pay out before breach
+			ctx.set_meta("red_team_pending_payout", {
+				"card_instance_id": iid,
+				"counter": payout_counter,
+				"amount": payout_amount,
+				"server_id": chosen
+			})
+
+			# Initiate the run
+			if ctx.has_meta("on_run_started"):
+				var cb: Callable = ctx.get_meta("on_run_started") as Callable
+				cb.call(chosen)
+				await Engine.get_main_loop().process_frame
+			var rsm: Object = ctx.get_meta("run_state_machine") if ctx.has_meta("run_state_machine") else null
+			if rsm == null:
+				push_error("AbilityInterpreter: run_central_if_unrun — no run_state_machine on ctx")
+				ctx.remove_meta("red_team_pending_payout")
+				return
+			await rsm.execute(chosen)
+
+			# Record that this central was run
+			if chosen not in ctx.runner_centrals_run_this_turn:
+				ctx.runner_centrals_run_this_turn.append(chosen)
+			ctx.remove_meta_if_exists("red_team_pending_payout")
+
 		"rez_card_free":
 			# Rez an installed card ignoring its rez cost.
 			# Prompts the active player to choose which card to rez.
@@ -452,10 +542,10 @@ func _execute_effect(effect: Dictionary, ctx: GameContext, chosen_target: Varian
 			var amount: int     = params.get("amount", 1)
 			if subject == "corp":
 				ctx.corp_hand_size_bonus += amount
-				ctx.log("Corp max hand size increased to %d." % ctx.corp_max_hand_size())
+				ctx.log("%s max hand size increased to %d." % [ctx.corp_name(), ctx.corp_max_hand_size()])
 			else:
 				ctx.runner_hand_size_bonus += amount
-				ctx.log("Runner max hand size increased to %d." % ctx.runner_max_hand_size())
+				ctx.log("%s max hand size increased to %d." % [ctx.runner_name(), ctx.runner_max_hand_size()])
 
 		"add_self_counter_if_server":
 			# Add a counter to self only if the run is on a specific server.
@@ -509,7 +599,7 @@ func _execute_effect(effect: Dictionary, ctx: GameContext, chosen_target: Varian
 				if taken > 0:
 					self_card.remove_counter(counter_type, taken)
 					ctx.runner_credits += taken
-					ctx.log("Runner takes %d cr from %s (%d remaining)." % [
+					ctx.log("%s takes %d cr from %s (%d remaining)." % [ctx.runner_name(), 
 						taken, self_card.display_name(), self_card.get_counter(counter_type)
 					])
 
@@ -546,8 +636,50 @@ func _execute_effect(effect: Dictionary, ctx: GameContext, chosen_target: Varian
 					self_card.remove_counter("credits", taken)
 					ctx.set_credits(subject, ctx.get_credits(subject) + taken)
 					ctx.log("%s takes %d cr from %s (%d remaining)." % [
-						subject.capitalize(), taken, self_card.display_name(),
+						ctx.player_name(subject), taken, self_card.display_name(),
 						self_card.get_counter("credits")
+					])
+
+		"take_hosted_credits_amount":
+			# Click action: take a fixed amount of hosted credits (Regolith, Telework).
+			# Respects available credits — takes up to amount or what's available.
+			var subject: String     = effect.get("subject", params.get("subject", "runner"))
+			var counter_type: String = effect.get("counter", params.get("counter", "credits"))
+			var amount: int         = int(effect.get("amount", params.get("amount", 3)))
+			var iid: String = ctx.current_event_data.get("card_instance_id", "")
+			var self_card := ctx.get_installed_card_by_instance_id(iid)
+			if self_card == null:
+				push_error("AbilityInterpreter: take_hosted_credits_amount — card not found")
+			else:
+				var available: int = self_card.get_counter(counter_type)
+				if available <= 0:
+					ctx.log("%s is empty." % self_card.display_name())
+				else:
+					var taken: int = min(amount, available)
+					self_card.remove_counter(counter_type, taken)
+					ctx.set_credits(subject, ctx.get_credits(subject) + taken)
+					ctx.log("%s takes %d cr from %s (%d remaining)." % [
+						ctx.player_name(subject), taken, self_card.display_name(),
+						self_card.get_counter(counter_type)
+					])
+
+		"take_all_hosted_credits":
+			# Click action: take ALL hosted credits (Smartware Distributor, Pennyshaver).
+			var subject: String     = effect.get("subject", params.get("subject", "runner"))
+			var counter_type: String = effect.get("counter", params.get("counter", "credits"))
+			var iid: String = ctx.current_event_data.get("card_instance_id", "")
+			var self_card := ctx.get_installed_card_by_instance_id(iid)
+			if self_card == null:
+				push_error("AbilityInterpreter: take_all_hosted_credits — card not found")
+			else:
+				var available: int = self_card.get_counter(counter_type)
+				if available <= 0:
+					ctx.log("%s has no credits to take." % self_card.display_name())
+				else:
+					self_card.remove_counter(counter_type, available)
+					ctx.set_credits(subject, ctx.get_credits(subject) + available)
+					ctx.log("%s takes all %d cr from %s." % [
+						ctx.player_name(subject), available, self_card.display_name()
 					])
 
 		"remove_self_counter":
@@ -576,12 +708,33 @@ func _execute_effect(effect: Dictionary, ctx: GameContext, chosen_target: Varian
 				ctx.unregister_all_card_effects(iid)
 				ctx.log("%s is trashed (empty)." % self_card.display_name())
 
+		"self_trash_if_empty_and_draw":
+			# Trash the owning card if empty, and draw 1 card for the Corp (Nico Campaign).
+			var counter_type: String = effect.get("counter", params.get("counter", "credits"))
+			var iid: String = ctx.current_event_data.get("card_instance_id", "")
+			var self_card := ctx.get_installed_card_by_instance_id(iid)
+			if self_card != null and self_card.get_counter(counter_type) <= 0:
+				var server: Server = ctx.get_server(self_card.server_id)
+				if server:
+					server.remove_from_root(self_card)
+					ctx.remove_empty_remote_servers()
+				ctx.runner_rig.erase(self_card)
+				ctx.unregister_all_card_effects(iid)
+				ctx.log("%s is trashed (empty)." % self_card.display_name())
+				# Draw 1 card for the Corp
+				if not ctx.corp_deck.is_empty():
+					var drawn: CardRecord = ctx.corp_deck.pop_front() as CardRecord
+					ctx.corp_hand.append({"card_id": drawn.id, "card_record": drawn})
+					ctx.log("%s draws %s (Nico Campaign)." % [ctx.corp_name(), drawn.title])
+				else:
+					ctx.log("%s deck is empty — cannot draw from Nico Campaign." % ctx.corp_name())
+
 		"lose_clicks_next_turn":
 			var subject: String = params.get("subject", "runner")
 			var amount: int     = params.get("amount", 1)
 			var current: int    = ctx.pending_click_penalties.get(subject, 0)
 			ctx.pending_click_penalties[subject] = current + amount
-			ctx.log("%s will lose %d click(s) next turn." % [subject.capitalize(), amount])
+			ctx.log("%s will lose %d click(s) next turn." % [ctx.player_name(subject), amount])
 
 		"add_counters_to_target":
 			var counter_type: String = params.get("counter_type", "advancement")
@@ -602,6 +755,85 @@ func _execute_effect(effect: Dictionary, ctx: GameContext, chosen_target: Varian
 			else:
 				push_error("AbilityInterpreter: trash_card has no valid target")
 
+		# ── Pennyshaver / Red Team: counter effects gated on central server ───
+
+		"add_self_counters_if_central":
+			# Add counters to the owning card only if the run was on a central server.
+			var counter_type: String = effect.get("counter", params.get("counter", "credits"))
+			var amount: int          = int(effect.get("amount", params.get("amount", 1)))
+			var server_id: String    = ctx.current_event_data.get("server_id", "")
+			var server: Server       = ctx.get_server(server_id)
+			if server != null and not server.is_remote():
+				var iid: String = ctx.current_event_data.get("card_instance_id", "")
+				var self_card   := ctx.get_installed_card_by_instance_id(iid)
+				if self_card == null and iid != "":
+					self_card = ctx.get_installed_card_by_id(iid)
+				if self_card != null:
+					self_card.add_counter(counter_type, amount)
+					ctx.log("Placed %d %s counter(s) on %s (%s run)." % [
+						amount, counter_type, self_card.display_name(), server_id
+					])
+
+		"take_hosted_credits_if_central":
+			# Transfer hosted credits to runner's pool only on a central server run.
+			var counter_type: String = effect.get("counter", params.get("counter", "credits"))
+			var amount: int          = int(effect.get("amount", params.get("amount", 1)))
+			var server_id: String    = ctx.current_event_data.get("server_id", "")
+			var server: Server       = ctx.get_server(server_id)
+			if server != null and not server.is_remote():
+				var iid: String = ctx.current_event_data.get("card_instance_id", "")
+				var self_card   := ctx.get_installed_card_by_instance_id(iid)
+				if self_card == null and iid != "":
+					self_card = ctx.get_installed_card_by_id(iid)
+				if self_card != null:
+					var available: int = self_card.get_counter(counter_type)
+					var taken: int     = min(amount, available)
+					if taken > 0:
+						self_card.remove_counter(counter_type, taken)
+						ctx.runner_credits += taken
+						ctx.log("%s takes %d cr from %s (%d remaining)." % [ctx.runner_name(), 
+							taken, self_card.display_name(), self_card.get_counter(counter_type)
+						])
+					else:
+						ctx.log("%s has no hosted credits to take." % self_card.display_name())
+
+		# ── Docklands Pass: bonus access gated on server ──────────────────────
+
+		"add_bonus_access_if_server":
+			# Add to run_modifiers["bonus_access"] if run is on the specified server.
+			# Only fires the FIRST TIME per turn that server is breached (Docklands Pass rule).
+			var required_server: String = params.get("server", "hq")
+			var amount: int             = params.get("amount", 1)
+			var actual_server: String   = ctx.current_event_data.get("server_id", "")
+			if actual_server == required_server:
+				# Use a per-turn flag on ctx so it persists across runs but resets each turn
+				var already_fired: bool = false
+				if required_server == "hq":
+					already_fired = ctx.runner_hq_breached_this_turn
+				if not already_fired:
+					if required_server == "hq":
+						ctx.runner_hq_breached_this_turn = true
+					var current: int = ctx.run_modifiers.get("bonus_access", 0)
+					ctx.run_modifiers["bonus_access"] = current + amount
+					ctx.log("Docklands Pass: +%d access on %s." % [amount, required_server.to_upper()])
+
+		# ── Mayfly: self-trash when run ends if the breaker was used ──────────
+
+		"self_trash_if_used_this_run":
+			# Trash the owning card at run end. Mayfly always trashes when the run
+			# ends if it was used — we check if any break ability was invoked by
+			# looking for the card in the encounter's used_breakers, but since we
+			# don't track that yet we trash unconditionally (correct per card text:
+			# "when this run ends, trash this program" fires whenever used).
+			var iid: String = ctx.current_event_data.get("card_instance_id", "")
+			var self_card   := ctx.get_installed_card_by_instance_id(iid)
+			if self_card == null and iid != "":
+				self_card = ctx.get_installed_card_by_id(iid)
+			if self_card != null:
+				ctx.runner_rig.erase(self_card)
+				ctx.unregister_all_card_effects(iid)
+				ctx.log("%s is trashed (end of run)." % self_card.display_name())
+
 		_:
 			push_error("AbilityInterpreter: unknown effect type '%s'" % etype)
 
@@ -611,10 +843,12 @@ func _execute_effect(effect: Dictionary, ctx: GameContext, chosen_target: Varian
 func _resolve_amount(amount_def: Variant, ctx: GameContext) -> int:
 	if amount_def is int:
 		return amount_def
+	if amount_def is float:
+		return int(amount_def)
 
 	# Structured amount: {"base": 2, "plus_counters": "advancement"}
 	if amount_def is Dictionary:
-		var base: int        = (amount_def as Dictionary).get("base", 0)
+		var base: int        = int((amount_def as Dictionary).get("base", 0))
 		var plus_counters    = (amount_def as Dictionary).get("plus_counters", "")
 		if plus_counters != "":
 			base += ctx.get_counters_on_accessed_card(plus_counters as String)
@@ -624,21 +858,27 @@ func _resolve_amount(amount_def: Variant, ctx: GameContext) -> int:
 	return 0
 
 
-func _deal_damage(damage_type: String, amount: int, ctx: GameContext) -> void:
+func _deal_damage(damage_type: String, amount: int, ctx: GameContext) -> Array:
 	ctx.log("Runner takes %d %s damage." % [amount, damage_type])
 	var trashed: int = 0
+	var trashed_cards: Array = []
 	for i in range(amount):
 		if ctx.runner_hand.is_empty():
-			ctx.log("Runner is flatlined! (no cards remaining in grip)")
-			# TODO: set game_over flag when GameState exists
+			ctx.log("%s is flatlined! (no cards remaining in grip)" % ctx.runner_name())
+			ctx.game_over = true
+			ctx.winner    = "corp"
 			break
-		# Trash a random card from grip
 		var idx: int = randi() % ctx.runner_hand.size()
-		var trashed_card: Dictionary = ctx.runner_hand[idx] as Dictionary
+		var entry: Dictionary = ctx.runner_hand[idx] as Dictionary
 		ctx.runner_hand.remove_at(idx)
+		var record: CardRecord = entry.get("card_record", null) as CardRecord
+		if record != null:
+			trashed_cards.append(record)
+			ctx.runner_discard.append(record)
 		trashed += 1
-		ctx.log("  Trashed from grip: %s" % trashed_card.get("card_id", "unknown"))
-	ctx.log("%d card(s) trashed from grip." % trashed)
+		ctx.log("  Trashed from grip: %s" % entry.get("card_id", "unknown"))
+	ctx.log("%d card(s) trashed from %s's grip." % [trashed, ctx.runner_name()])
+	return trashed_cards
 
 
 func _trash_installed_card(card: InstalledCard, ctx: GameContext) -> void:
@@ -657,12 +897,12 @@ func _draw_cards(subject: String, amount: int, ctx: GameContext) -> void:
 	var drawn := 0
 	for i in range(amount):
 		if deck.is_empty():
-			ctx.log("%s deck empty — cannot draw." % subject.capitalize())
+			ctx.log("%s deck empty — cannot draw." % ctx.player_name(subject))
 			break
 		var card: CardRecord = deck.pop_front() as CardRecord
 		hand.append({"card_id": card.id, "card_record": card})
 		drawn += 1
-	ctx.log("%s draws %d card(s)." % [subject.capitalize(), drawn])
+	ctx.log("%s draws %d card(s)." % [ctx.player_name(subject), drawn])
 
 
 # ── Encounter action processing ───────────────────────────────────────────────
@@ -710,8 +950,8 @@ func _do_boost(action: Dictionary, encounter: EncounterState,
 	var times: int             = action.get("times", 1)
 	var total_cost: int        = cost * times
 
-	if ctx.runner_credits < total_cost:
-		ctx.log("[Encounter] Cannot afford boost (need %d, have %d)." % [total_cost, ctx.runner_credits])
+	if ctx.runner_available_credits() < total_cost:
+		ctx.log("[Encounter] Cannot afford boost (need %d, have %d)." % [total_cost, ctx.runner_available_credits()])
 		return false
 
 	# Calculate strength gained — Unity gets +1 per installed icebreaker
@@ -720,7 +960,7 @@ func _do_boost(action: Dictionary, encounter: EncounterState,
 		var icebreaker_count: int = _count_installed_icebreakers(ctx, ability_registry)
 		str_per_use = icebreaker_count
 
-	ctx.runner_credits -= total_cost
+	ctx.runner_spend_credits(total_cost)
 	var total_boost: int = str_per_use * times
 	encounter.apply_boost(breaker, total_boost)
 	ctx.log("[Encounter] %s boosted %d times (+%d str, now %d). Cost: %d cr." % [
@@ -764,11 +1004,11 @@ func _do_break_sub(action: Dictionary, encounter: EncounterState,
 		return false
 
 	var cost: int = break_dict.get("cost_per_sub", 1)
-	if ctx.runner_credits < cost:
-		ctx.log("[Encounter] Cannot afford to break (need %d, have %d)." % [cost, ctx.runner_credits])
+	if ctx.runner_available_credits() < cost:
+		ctx.log("[Encounter] Cannot afford to break (need %d, have %d)." % [cost, ctx.runner_available_credits()])
 		return false
 
-	ctx.runner_credits -= cost
+	ctx.runner_spend_credits(cost)
 	encounter.break_subroutine(sub_index)
 	var sub_label: String = (encounter.subroutines[sub_index] as Dictionary).get("label", "subroutine %d" % sub_index)
 	ctx.log("[Encounter] %s breaks \'%s\' for %d cr." % [breaker.display_name(), sub_label, cost])
@@ -796,18 +1036,18 @@ func _do_break_all(action: Dictionary, encounter: EncounterState,
 	var unbroken       := encounter.unbroken_indices()
 	var total_cost     := cost_per_sub * unbroken.size()
 
-	if ctx.runner_credits < total_cost:
+	if ctx.runner_available_credits() < total_cost:
 		# Break as many as we can afford
-		var can_break := ctx.runner_credits / cost_per_sub
+		var can_break: int = ctx.runner_available_credits() / cost_per_sub
 		for i in range(can_break):
-			ctx.runner_credits -= cost_per_sub
+			ctx.runner_spend_credits(cost_per_sub)
 			encounter.break_subroutine(unbroken[i])
 			var sub_label: String = (encounter.subroutines[unbroken[i]] as Dictionary).get("label", "sub %d" % unbroken[i])
 			ctx.log("[Encounter] %s breaks \'%s\'." % [breaker.display_name(), sub_label])
 		ctx.log("[Encounter] Out of credits — %d subs remain unbroken." % (unbroken.size() - can_break))
 	else:
 		for idx in unbroken:
-			ctx.runner_credits -= cost_per_sub
+			ctx.runner_spend_credits(cost_per_sub)
 			encounter.break_subroutine(idx)
 			var sub_label: String = (encounter.subroutines[idx] as Dictionary).get("label", "sub %d" % idx)
 			ctx.log("[Encounter] %s breaks \'%s\'." % [breaker.display_name(), sub_label])
@@ -857,8 +1097,8 @@ func _do_spend_hosted_credits(action: Dictionary, encounter: EncounterState, ctx
 		return false
 	source.remove_counter("credits", taken)
 	ctx.runner_credits += taken
-	ctx.log("[Encounter] Runner takes %d cr from %s (%d remaining)." % [
-		taken, source.display_name(), source.get_counter("credits")
+	ctx.log("[Encounter] %s takes %d cr from %s (%d remaining)." % [
+		ctx.runner_name(), taken, source.display_name(), source.get_counter("credits")
 	])
 	return true
 

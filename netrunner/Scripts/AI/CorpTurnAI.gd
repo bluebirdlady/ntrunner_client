@@ -23,15 +23,27 @@ const ECONOMY_THRESHOLD := 6   # try to stay above this credit level
 const MIN_HAND_SIZE     := 3   # draw if hand drops below this
 
 var _run_ai: CorpRunAI
+var _ability_registry: AbilityRegistry
 
 
 func _init(ability_registry: AbilityRegistry) -> void:
 	_run_ai = CorpRunAI.new(ability_registry)
+	_ability_registry = ability_registry
 
 
 # ── Turn-time interface ───────────────────────────────────────────────────────
 
 func choose_action(ctx: GameContext) -> GameAction:
+	# 0. Rez any unrezzed assets or upgrades we can afford
+	var to_rez := _find_unrezzed_asset_or_upgrade(ctx)
+	if to_rez != null and ctx.corp_credits >= max(0, to_rez.card_record.cost):
+		return GameAction.rez_card(to_rez.card_id, to_rez.runtime_instance_id)
+
+	# 0b. Use click actions on installed Corp cards (e.g. Regolith Mining License)
+	var card_with_action := _find_corp_click_action(ctx)
+	if card_with_action != null:
+		return GameAction.use_installed_card(card_with_action.runtime_instance_id, card_with_action.card_id)
+
 	# 1. Score a ready agenda
 	var ready := _find_ready_agenda(ctx)
 	if ready != null:
@@ -310,3 +322,34 @@ func choose_modes(modes: Array, max_choices: int, ctx: GameContext) -> Array:
 func _server_has_ice(ctx: GameContext, server_id: String) -> bool:
 	var server: Server = ctx.get_server(server_id)
 	return server != null and server.has_ice()
+
+
+func _find_unrezzed_asset_or_upgrade(ctx: GameContext) -> InstalledCard:
+	# Find any installed but unrezzed asset or upgrade the Corp can afford to rez
+	for server in ctx.servers.values():
+		var s: Server = server as Server
+		for card in s.root:
+			var c: InstalledCard = card as InstalledCard
+			if not c.is_rezzed and c.card_record != null:
+				var ctype: String = c.card_record.card_type
+				if ctype == "asset" or ctype == "upgrade":
+					return c
+	return null
+
+
+func _find_corp_click_action(ctx: GameContext) -> InstalledCard:
+	# Find a rezzed Corp installed card with a click_action and credits remaining
+	for server in ctx.servers.values():
+		var s: Server = server as Server
+		for card in s.root:
+			var c: InstalledCard = card as InstalledCard
+			if not c.is_rezzed or c.card_record == null:
+				continue
+			# Check if it has a click_action defined
+			var card_def: Dictionary = _ability_registry._abilities.get(c.card_id, {}) as Dictionary
+			if not card_def.has("click_action"):
+				continue
+			# Only use if it has hosted credits to take
+			if c.get_counter("credits") > 0:
+				return c
+	return null

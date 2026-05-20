@@ -15,7 +15,12 @@ extends RefCounted
 const CORP_CLICKS_PER_TURN:   int = 3
 const RUNNER_CLICKS_PER_TURN: int = 4
 const MAX_HAND_SIZE:          int = 5
-const AGENDA_POINTS_TO_WIN:   int = 7
+
+# Starter deck identities play to 6 agenda points; all others play to 7
+const STARTER_CORP_ID:   String = "the_syndicate_profit_over_principle"
+const STARTER_RUNNER_ID: String = "the_catalyst_convention_breaker"
+
+var agenda_points_to_win: int = 7
 
 var ctx:              GameContext
 var ability_registry: AbilityRegistry
@@ -43,6 +48,16 @@ func _init(game_ctx: GameContext, ab_registry: AbilityRegistry) -> void:
 # ── Main loop ─────────────────────────────────────────────────────────────────
 
 func run_game() -> void:
+	# Set win threshold: starter identities play to 6, all others to 7
+	var corp_id:   String = ctx.corp_identity.id   if ctx.corp_identity   != null else ""
+	var runner_id: String = ctx.runner_identity.id if ctx.runner_identity != null else ""
+	if corp_id == STARTER_CORP_ID and runner_id == STARTER_RUNNER_ID:
+		agenda_points_to_win = 6
+		ctx.agenda_points_to_win = 6
+		ctx.log("Starter decks detected — playing to 6 agenda points.")
+	else:
+		agenda_points_to_win = 7
+		ctx.agenda_points_to_win = 7
 	while not ctx.game_over:
 		await _corp_turn()
 		if ctx.game_over:
@@ -57,14 +72,15 @@ func _corp_turn() -> void:
 	var corp_penalty: int = ctx.pending_click_penalties.get("corp", 0)
 	ctx.corp_clicks = max(0, CORP_CLICKS_PER_TURN - corp_penalty)
 	ctx.pending_click_penalties["corp"] = 0
+	ctx.corp_installed_this_turn = []   # reset for Seamless Launch restriction
 	if corp_penalty > 0:
-		ctx.log("Corp loses %d click(s) this turn (deferred penalty)." % corp_penalty)
+		ctx.log("%s loses %d click(s) this turn (deferred penalty)." % [ctx.corp_name(), corp_penalty])
 
 	# Draw phase: mandatory draw, then start-of-turn events
 	_corp_mandatory_draw()
 	emit_signal("turn_started", "corp", ctx.turn_number)
-	ctx.log("=== Corp Turn %d begins. Credits: %d, Clicks: %d ===" % [
-		ctx.turn_number, ctx.corp_credits, ctx.corp_clicks
+	ctx.log("=== %s Turn %d begins. Credits: %d, Clicks: %d ===" % [
+		ctx.corp_name(), ctx.turn_number, ctx.corp_credits, ctx.corp_clicks
 	])
 	# Fire start-of-turn triggers (assets, upgrades, etc.)
 	await ctx.notify_event("corp_turn_start", {}, interpreter)
@@ -72,17 +88,17 @@ func _corp_turn() -> void:
 	# Action phase
 	while ctx.corp_clicks > 0 and not ctx.game_over:
 		if ctx.corp_decision_maker == null:
-			ctx.log("No Corp decision maker — ending Corp turn.")
+			ctx.log("No %s decision maker — ending turn." % ctx.corp_name())
 			break
 
 		var action: GameAction = await ctx.corp_decision_maker.choose_action(ctx)
 		if action == null:
-			ctx.log("Corp decision maker returned null — ending Corp turn.")
+			ctx.log("No action from %s — ending turn." % ctx.corp_name())
 			break
 
 		var result := await _execute_action("corp", action)
 		if not result["ok"]:
-			ctx.log("Corp action rejected: %s" % result["reason"])
+			ctx.log("%s action rejected: %s" % [ctx.corp_name(), result["reason"]])
 			# Give the AI another chance rather than looping forever
 			# If it keeps producing invalid actions something is wrong
 			break
@@ -93,7 +109,7 @@ func _corp_turn() -> void:
 
 func _corp_mandatory_draw() -> void:
 	if ctx.corp_deck.is_empty():
-		ctx.log("Corp deck is empty — Corp loses!")
+		ctx.log("%s deck is empty — %s loses!" % [ctx.corp_name(), ctx.corp_name()])
 		_end_game("runner", "Corp could not draw (empty R&D)")
 		return
 		
@@ -104,7 +120,7 @@ func _corp_mandatory_draw() -> void:
 	ctx.corp_hand.append({"card_id": drawn.id, "card_record": drawn})
 	
 	emit_signal("hand_changed", "corp")
-	ctx.log("Corp draws %s." % drawn.title)
+	ctx.log("%s draws %s." % [ctx.corp_name(), drawn.title])
 
 
 func _corp_discard_to_hand_limit() -> void:
@@ -113,7 +129,9 @@ func _corp_discard_to_hand_limit() -> void:
 		var discarded: Dictionary = ctx.corp_hand.pop_back() as Dictionary
 		var record: CardRecord    = discarded.get("card_record", null) as CardRecord
 		ctx.corp_discard.append(record)
-		ctx.log("Corp discards %s to hand limit." % (record.title if record else "?"))
+		if record != null:
+			ctx.corp_discard_facedown[record.title] = true   # hand discards always facedown
+		ctx.log("%s discards %s to hand limit." % [ctx.corp_name(), record.title if record else "?"])
 	emit_signal("hand_changed", "corp")
 
 
@@ -124,30 +142,34 @@ func _runner_turn() -> void:
 	var runner_penalty: int = ctx.pending_click_penalties.get("runner", 0)
 	ctx.runner_clicks = max(0, RUNNER_CLICKS_PER_TURN - runner_penalty)
 	ctx.pending_click_penalties["runner"] = 0
+	ctx.runner_made_successful_run_this_turn = false   # reset each turn
+	ctx.runner_centrals_run_this_turn = []             # reset each turn
+	ctx.runner_click_draws_this_turn  = 0              # reset each turn
+	ctx.runner_hq_breached_this_turn  = false          # reset each turn
 	if runner_penalty > 0:
-		ctx.log("Runner loses %d click(s) this turn (deferred penalty)." % runner_penalty)
+		ctx.log("%s loses %d click(s) this turn (deferred penalty)." % [ctx.runner_name(), runner_penalty])
 	ctx.turn_number   += 1
 
 	emit_signal("turn_started", "runner", ctx.turn_number)
-	ctx.log("=== Runner Turn %d begins. Credits: %d, Clicks: %d ===" % [
-		ctx.turn_number, ctx.runner_credits, ctx.runner_clicks
+	ctx.log("=== %s Turn %d begins. Credits: %d, Clicks: %d ===" % [
+		ctx.runner_name(), ctx.turn_number, ctx.runner_credits, ctx.runner_clicks
 	])
 	# Fire start-of-turn triggers (resources, hardware, etc.)
 	await ctx.notify_event("runner_turn_start", {}, interpreter)
 
 	while ctx.runner_clicks > 0 and not ctx.game_over:
 		if ctx.runner_decision_maker == null:
-			ctx.log("No Runner decision maker — ending Runner turn.")
+			ctx.log("No %s decision maker — ending turn." % ctx.runner_name())
 			break
 
 		var action: GameAction = await ctx.runner_decision_maker.choose_action(ctx)
 		if action == null:
-			ctx.log("Runner decision maker returned null — ending Runner turn.")
+			ctx.log("No action from %s — ending turn." % ctx.runner_name())
 			break
 
 		var result := await _execute_action("runner", action)
 		if not result["ok"]:
-			ctx.log("Runner action rejected: %s" % result["reason"])
+			ctx.log("%s action rejected: %s" % [ctx.runner_name(), result["reason"]])
 			break
 
 	# Runner has no discard phase
@@ -170,7 +192,9 @@ func _execute_action(player: String, action: GameAction) -> Dictionary:
 		"advance":         await _do_advance(player, action)
 		"play_operation":  await _do_play_operation(player, action)
 		"run":             await _do_run(action)
-		"end_turn":        await _do_end_turn(player)
+		"rez_card":           await _do_rez_card(player, action)
+		"use_installed_card": await _do_use_installed_card(player, action)
+		"end_turn":           await _do_end_turn(player)
 		_:
 			return {"ok": false, "reason": "Unknown action type: %s" % action.type}
 
@@ -186,6 +210,14 @@ func _validate_action(player: String, action: GameAction) -> Dictionary:
 
 	match action.type:
 		"end_turn":
+			return {"ok": true, "reason": ""}
+
+		"rez_card":
+			return {"ok": true, "reason": ""}
+
+		"use_installed_card":
+			if clicks < 1:
+				return {"ok": false, "reason": "Not enough clicks"}
 			return {"ok": true, "reason": ""}
 
 		"gain_credits", "draw_card", "run":
@@ -238,7 +270,7 @@ func _do_gain_credits(player: String) -> void:
 	_spend_click(player)
 	ctx.set_credits(player, ctx.get_credits(player) + 1)
 	emit_signal("credits_changed", player, ctx.get_credits(player))
-	ctx.log("%s gains 1 credit. (%d total)" % [player.capitalize(), ctx.get_credits(player)])
+	ctx.log("%s gains 1 credit. (%d total)" % [ctx.player_name(player), ctx.get_credits(player)])
 
 
 func _do_draw_card(player: String) -> void:
@@ -249,7 +281,7 @@ func _do_draw_card(player: String) -> void:
 		if player == "corp":
 			_end_game("runner", "Corp could not draw (empty R&D)")
 		else:
-			ctx.log("Runner deck is empty — cannot draw.")
+			ctx.log("%s deck is empty — cannot draw." % ctx.runner_name())
 		return
 		
 	# Pop the object asset cleanly
@@ -262,7 +294,25 @@ func _do_draw_card(player: String) -> void:
 		ctx.runner_hand.append(hand_entry)
 		
 	emit_signal("hand_changed", player)
-	ctx.log("%s draws %s." % [player.capitalize(), drawn.title])
+	ctx.log("%s draws %s." % [ctx.player_name(player), drawn.title])
+
+	# Verbal Plasticity: draw 1 extra card on the FIRST click-draw of the runner's turn only.
+	if player == "runner":
+		ctx.runner_click_draws_this_turn += 1
+		if ctx.runner_click_draws_this_turn == 1:
+			var mods: Array = ctx._state_modifiers.get("extra_draw_on_click_draw", [])
+			if not mods.is_empty():
+				var extra: int = 0
+				for mod in mods:
+					extra += (mod as Dictionary).get("value", 0) as int
+				for _i in range(extra):
+					if deck.is_empty():
+						ctx.log("%s deck empty — Verbal Plasticity cannot draw extra." % ctx.runner_name())
+						break
+					var extra_card: CardRecord = deck.pop_front() as CardRecord
+					ctx.runner_hand.append({"card_id": extra_card.id, "card_record": extra_card})
+					ctx.log("Verbal Plasticity: %s draws %s." % [ctx.runner_name(), extra_card.title])
+				emit_signal("hand_changed", player)
 
 
 func _do_install(player: String, action: GameAction) -> void:
@@ -274,19 +324,46 @@ func _do_install(player: String, action: GameAction) -> void:
 	# Runner programs, hardware, and resources go directly to the rig
 	if player == "runner" and server_id == "runner_rig":
 		var pay_cost: int = max(0, record.cost)
+
+		# Conditional install cost reduction (e.g. Carmen: 5 → 3 after successful run)
+		var card_def: Dictionary = ability_registry._abilities.get(record.id, {}) as Dictionary
+		var conditional_cost: Variant = card_def.get("install_cost_if_successful_run", null)
+		if conditional_cost != null and ctx.runner_made_successful_run_this_turn:
+			pay_cost = int(conditional_cost)
+			ctx.log("Conditional install cost applies: %s costs %d¢ this turn." % [record.title, pay_cost])
+
 		print("Player install: card is: ", record.title, " and charged cost is: ", pay_cost)
+
+		# MU check for programs
+		if record.card_type == "program" and record.memory_cost > 0:
+			var mu_needed: int = record.memory_cost
+			if ctx.runner_mu_available() < mu_needed:
+				# Runner may trash installed programs to make room — for now, reject if not enough MU
+				ctx.log("%s cannot install %s — not enough MU (%d needed, %d available, %d total)." % [
+					ctx.runner_name(), record.title,
+					mu_needed, ctx.runner_mu_available(), ctx.runner_total_mu()
+				])
+				return
+
 		if ctx.runner_credits < pay_cost:
-			ctx.log("Runner cannot afford to install %s." % record.title)
+			ctx.log("%s cannot afford to install %s." % [ctx.runner_name(), record.title])
 			return
 		ctx.runner_credits -= pay_cost
 		var installed := InstalledCard.make_runtime_instance(record, "runner_rig", "root", true)
 		ctx.runner_rig.append(installed)
 		_remove_from_hand(player, record)
 		_register_card_listeners(installed)
-		await ctx.notify_event("on_rez", {"card": installed, "card_instance_id": installed.runtime_instance_id}, interpreter)
+		# Fire on_rez directly on this card only — never broadcast via notify_event
+		var on_rez_def = ability_registry.get_on_rez(record.id)
+		if on_rez_def != null:
+			ctx.current_event_data = {"card": installed, "card_instance_id": installed.runtime_instance_id}
+			await interpreter.execute_trigger(on_rez_def as Dictionary, ctx)
+			ctx.current_event_data = {}
 		emit_signal("card_installed", record, "runner_rig")
 		emit_signal("hand_changed", player)
-		ctx.log("Runner installs %s." % record.title)
+		ctx.log("%s installs %s. [MU: %d/%d used]" % [
+			ctx.runner_name(), record.title, ctx.runner_mu_used(), ctx.runner_total_mu()
+		])
 		return
 
 	# Get or create server for corp cards and runner ice (future)
@@ -300,7 +377,7 @@ func _do_install(player: String, action: GameAction) -> void:
 		var ice_cost: int = server.ice_install_cost()
 		ctx.set_credits(player, ctx.get_credits(player) - ice_cost)
 		if ice_cost > 0:
-			ctx.log("%s pays %d credit(s) to install ice." % [player.capitalize(), ice_cost])
+			ctx.log("%s pays %d credit(s) to install ice." % [ctx.player_name(player), ice_cost])
 
 	# Create InstalledCard
 	var installed := InstalledCard.make_runtime_instance(record, server_id, zone, false)
@@ -313,21 +390,12 @@ func _do_install(player: String, action: GameAction) -> void:
 	# Remove from hand
 	_remove_from_hand(player, record)
 
-	# Corp non-ice root cards are auto-rezzed on install
-	if player == "corp" and zone == "root" and not record.is_agenda():
-		var rez_cost: int = max(0, record.cost)
-		if ctx.corp_credits >= rez_cost:
-			ctx.corp_credits -= rez_cost
-			installed.is_rezzed = true
-			_register_card_listeners(installed)
-			await ctx.notify_event("on_rez", {"card": installed, "card_instance_id": installed.runtime_instance_id}, interpreter)
-			ctx.log("Corp rezzes %s for %d cr." % [record.title, rez_cost])
-		else:
-			ctx.log("Corp installs %s unrezzed (cannot afford rez cost)." % record.title)
-
 	emit_signal("card_installed", record, server_id)
 	emit_signal("hand_changed", player)
-	ctx.log("%s installs %s in %s." % [player.capitalize(), record.title, server.display_name()])
+	ctx.log("%s installs %s in %s." % [ctx.player_name(player), record.title, server.display_name()])
+	# Track Corp installs this turn for Seamless Launch restriction
+	if player == "corp":
+		ctx.corp_installed_this_turn.append(record.id)
 
 
 func _do_advance(player: String, action: GameAction) -> void:
@@ -343,7 +411,7 @@ func _do_advance(player: String, action: GameAction) -> void:
 	card.add_counter("advancement", 1)
 	emit_signal("card_advanced", card_id, card.get_counter("advancement"))
 	ctx.log("%s advances %s (%d counters)." % [
-		player.capitalize(), card.display_name(), card.get_counter("advancement")
+		ctx.player_name(player), card.display_name(), card.get_counter("advancement")
 	])
 
 	# Check if agenda can be scored
@@ -367,9 +435,12 @@ func _do_play_operation(player: String, action: GameAction) -> void:
 	if on_play_def != null:
 		await interpreter.execute_trigger(on_play_def as Dictionary, ctx)
 
-	# Operations go to discard after resolving
-	ctx.corp_discard.append(record)
-	ctx.log("%s plays %s." % [player.capitalize(), record.title])
+	# Operations/events go to the correct discard pile after resolving
+	if player == "corp":
+		ctx.corp_discard.append(record)
+	else:
+		ctx.runner_discard.append(record)
+	ctx.log("%s plays %s." % [ctx.player_name(player), record.title])
 	emit_signal("hand_changed", player)
 
 
@@ -390,6 +461,94 @@ func _do_run(action: GameAction) -> void:
 	else:
 		run = RunStateMachine.new(ctx, ability_registry)
 	await run.execute(server_id)
+	if ctx.run_successful:
+		ctx.runner_made_successful_run_this_turn = true
+	# Track central servers attempted (for Red Team restriction)
+	if server_id in ["hq", "rd", "archives"]:
+		if server_id not in ctx.runner_centrals_run_this_turn:
+			ctx.runner_centrals_run_this_turn.append(server_id)
+
+
+func _do_use_installed_card(player: String, action: GameAction) -> void:
+	_spend_click(player)
+	var instance_id: String = action.params.get("card_instance_id", "")
+	var card_id: String     = action.params.get("card_id", "")
+
+	# Find the installed card
+	var installed: InstalledCard = null
+	var search_list: Array = ctx.runner_rig if player == "runner" else []
+	for server in ctx.servers.values():
+		search_list.append_array((server as Server).root)
+	for card in search_list:
+		var c: InstalledCard = card as InstalledCard
+		if c == null:
+			continue
+		if (instance_id != "" and c.runtime_instance_id == instance_id) or \
+		   (instance_id == "" and c.card_id == card_id):
+			installed = c
+			break
+
+	if installed == null:
+		ctx.log("use_installed_card: card not found (%s)" % (instance_id if instance_id != "" else card_id))
+		return
+
+	# Look up click_action definition in ability registry
+	var card_def: Dictionary = ability_registry._abilities.get(installed.card_id, {}) as Dictionary
+	var click_action_def: Dictionary = card_def.get("click_action", {}) as Dictionary
+	if click_action_def.is_empty():
+		ctx.log("use_installed_card: %s has no click_action defined." % installed.display_name())
+		return
+
+	ctx.current_event_data = {"card": installed, "card_instance_id": installed.runtime_instance_id}
+	await interpreter.execute_trigger(click_action_def, ctx)
+	ctx.current_event_data = {}
+
+
+func _do_rez_card(player: String, action: GameAction) -> void:
+	# Rezzing costs no click — it's a paid action outside the normal click economy.
+	# Find the card by instance_id or card_id across all servers.
+	var instance_id: String = action.params.get("card_instance_id", "")
+	var card_id: String     = action.params.get("card_id", "")
+
+	var installed: InstalledCard = null
+	for server in ctx.servers.values():
+		var s: Server = server as Server
+		for card in s.root:
+			var c: InstalledCard = card as InstalledCard
+			if (instance_id != "" and c.runtime_instance_id == instance_id) or \
+			   (instance_id == "" and c.card_id == card_id):
+				installed = c
+				break
+		if installed != null:
+			break
+
+	if installed == null or installed.card_record == null:
+		ctx.log("Rez failed: card not found (%s)" % (instance_id if instance_id != "" else card_id))
+		return
+
+	var rez_cost: int = max(0, installed.card_record.cost)
+	var credits: int  = ctx.corp_credits if player == "corp" else ctx.runner_credits
+
+	if credits < rez_cost:
+		ctx.log("Cannot afford to rez %s (costs %d, have %d)." % [installed.display_name(), rez_cost, credits])
+		return
+
+	if player == "corp":
+		ctx.corp_credits -= rez_cost
+	else:
+		ctx.runner_credits -= rez_cost
+
+	installed.is_rezzed = true
+	_register_card_listeners(installed)
+
+	var on_rez_def = ability_registry.get_on_rez(installed.card_id)
+	if on_rez_def != null:
+		ctx.current_event_data = {"card": installed, "card_instance_id": installed.runtime_instance_id}
+		await interpreter.execute_trigger(on_rez_def as Dictionary, ctx)
+		ctx.current_event_data = {}
+
+	ctx.log("%s rezzes %s for %d cr." % [ctx.player_name(player), installed.display_name(), rez_cost])
+	emit_signal("card_installed", installed.card_record, installed.server_id)
 
 
 func _do_end_turn(player: String) -> void:
@@ -397,7 +556,7 @@ func _do_end_turn(player: String) -> void:
 		ctx.corp_clicks = 0
 	else:
 		ctx.runner_clicks = 0
-	ctx.log("%s ends their turn." % player.capitalize())
+	ctx.log("%s ends their turn." % ctx.player_name(player))
 
 
 # ── Win condition checking ────────────────────────────────────────────────────
@@ -407,23 +566,23 @@ func _check_win_conditions() -> void:
 		return
 
 	# Agenda point victory
-	if ctx.corp_agenda_points() >= AGENDA_POINTS_TO_WIN:
-		_end_game("corp", "Corp scored %d agenda points" % ctx.corp_agenda_points())
+	if ctx.corp_agenda_points() >= agenda_points_to_win:
+		_end_game("corp", "%s scored %d agenda points" % [ctx.corp_name(), ctx.corp_agenda_points()])
 		return
-	if ctx.runner_agenda_points() >= AGENDA_POINTS_TO_WIN:
-		_end_game("runner", "Runner scored %d agenda points" % ctx.runner_agenda_points())
+	if ctx.runner_agenda_points() >= agenda_points_to_win:
+		_end_game("runner", "%s scored %d agenda points" % [ctx.runner_name(), ctx.runner_agenda_points()])
 		return
 
 	# Flatline — runner has no cards in grip
 	if ctx.runner_hand.is_empty() and ctx.active_player == "runner":
-		_end_game("corp", "Runner flatlined (empty grip)")
+		_end_game("corp", "\"%s\" flatlined (empty grip)" % ctx.runner_name())
 		return
 
 
 func _end_game(winner: String, reason: String) -> void:
 	ctx.game_over = true
 	ctx.winner    = winner
-	ctx.log("Game over — %s wins. %s" % [winner.capitalize(), reason])
+	ctx.log("Game over — %s wins. %s" % [ctx.player_name(winner), reason])
 	emit_signal("game_over", winner, reason)
 
 
@@ -431,7 +590,7 @@ func _end_game(winner: String, reason: String) -> void:
 
 func _score_agenda(card: InstalledCard) -> void:
 	var record: CardRecord = card.card_record
-	ctx.log("Corp scores %s! (%d agenda points)" % [record.title, record.agenda_points])
+	ctx.log("%s scores %s! (%d agenda points)" % [ctx.corp_name(), record.title, record.agenda_points])
 	ctx.corp_score_area.append(record)
 
 	# Remove from server
@@ -472,8 +631,9 @@ func _register_card_listeners(installed: InstalledCard) -> void:
 	var card_def: Dictionary = ability_registry._abilities.get(card_id, {}) as Dictionary
 
 	# Register triggered event listeners
-	for event_type in ["corp_turn_start", "runner_turn_start", "on_rez",
-						"encounter_ice", "pass_ice", "successful_run", "approach_server"]:
+	for event_type in ["corp_turn_start", "runner_turn_start",
+						"encounter_ice", "pass_ice", "successful_run", "approach_server",
+						"run_end"]:
 		var trigger_def = card_def.get(event_type, null)
 		if trigger_def != null:
 			ctx.register_listener(event_type, instance_id, trigger_def as Dictionary)

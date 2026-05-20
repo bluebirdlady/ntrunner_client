@@ -35,6 +35,9 @@ static func play_operation(card_record: CardRecord) -> GameAction:
 static func run(server_id: String) -> GameAction:
 	return _make("run", {"server_id": server_id})
 
+static func use_installed_card(instance_id: String, card_id: String) -> GameAction:
+	return _make("use_installed_card", {"card_instance_id": instance_id, "card_id": card_id})
+
 static func end_turn() -> GameAction:
 	return _make("end_turn", {})
 
@@ -60,8 +63,9 @@ func describe() -> String:
 		"install":
 			var r: CardRecord = params.get("card_record", null)
 			return "Install %s in %s" % [r.title if r else "?", params.get("server_id", "?")]
-		"pass":       return "Pass priority"
-		"rez_card":   return "Rez %s" % params.get("card_id", "?")
+		"pass":               return "Pass priority"
+		"rez_card":          return "Rez %s" % params.get("card_id", "?")
+		"use_installed_card": return "Use %s" % params.get("card_id", "?")
 		_:
 			return type
 

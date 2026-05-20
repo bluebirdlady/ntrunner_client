@@ -23,6 +23,7 @@ var agenda_points:          int   # agendas only (-1 = not applicable)
 var strength:               int   # ice and icebreakers (-1 = null/variable)
 var trash_cost:             int   # assets and upgrades (-1 = not trashable)
 var memory_cost:            int   # programs only (-1 = not applicable)
+var memory_limit:           int   # runner identities only (-1 = not applicable; from card_abilities.mu_provided)
 var base_link:              int   # runner identities only (-1 = not applicable)
 
 # Deckbuilding
@@ -53,11 +54,24 @@ static func from_api_data(data: Dictionary) -> CardRecord:
 	var attrs: Dictionary = data.get("attributes", data) as Dictionary
 
 	# id: v3 has slug at top level, v2 has numeric "code"
-	r.id = data.get("id", data.get("code", ""))
+	# Normalize to underscore form so abilities.json and deck lists can use
+	# stable human-readable keys regardless of API version.
+	# v3 slugs are hyphenated ("hedge-fund"), v2 codes are numeric ("30064").
+	# We convert hyphens → underscores; numeric codes are left as-is (they
+	# won't match any ability definition, but they'll still load as CardRecords).
+	var raw_id: String = data.get("id", data.get("code", ""))
+	r.id = raw_id.replace("-", "_")
 	r.title        = attrs.get("title", "")
 	r.side         = attrs.get("side_code", attrs.get("side_id", ""))
 	r.faction      = attrs.get("faction_code", attrs.get("faction_id", ""))
-	r.card_type    = attrs.get("type_code", attrs.get("card_type_id", ""))
+	var raw_type: String = attrs.get("type_code", attrs.get("card_type_id", ""))
+	# v3 API prefixes types with faction: "corp_agenda" → "agenda", "runner_program" → "program"
+	# Strip the prefix so is_agenda(), is_ice() etc. work correctly.
+	for prefix in ["corp_", "runner_"]:
+		if raw_type.begins_with(prefix):
+			raw_type = raw_type.substr(prefix.length())
+			break
+	r.card_type = raw_type
 
 	# Subtypes: v2 uses "keywords" string "Barrier - Destroyer", v3 uses "card_subtype_ids" array
 	var keywords: String = attrs.get("keywords", "")
@@ -72,6 +86,9 @@ static func from_api_data(data: Dictionary) -> CardRecord:
 	r.strength                = _int_or(attrs.get("strength", null), -1)
 	r.trash_cost              = _int_or(attrs.get("trash_cost", null), -1)
 	r.memory_cost             = _int_or(attrs.get("memory_cost", null), -1)
+	# Identity memory limit lives under card_abilities.mu_provided in v3 API
+	var card_abilities: Dictionary = attrs.get("card_abilities", {}) as Dictionary
+	r.memory_limit            = _int_or(card_abilities.get("mu_provided", null), -1)
 	r.base_link               = _int_or(attrs.get("base_link", null), -1)
 
 	r.influence_cost    = _int_or(attrs.get("faction_cost", attrs.get("influence_cost", null)), 0)

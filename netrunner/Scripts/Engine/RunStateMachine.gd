@@ -37,7 +37,7 @@ signal encounter_started(encounter: EncounterState)
 signal encounter_updated(encounter: EncounterState)
 signal run_succeeded(server_id: String)
 signal run_ended_unsuccessfully(reason: String)
-signal card_accessed(installed_card: InstalledCard)
+signal card_accessed(card_record: CardRecord, outcome: String)
 
 # Structural window notifications for UI state synchronization
 signal timing_window_opened(priority_actor: String)
@@ -212,6 +212,24 @@ func _phase_success() -> void:
 	# Global announcement triggers
 	await ctx.notify_event("successful_run", {"server_id": _target_server.server_id}, interpreter)
 
+	# Red Team payout: take hosted credits before breach
+	if ctx.has_meta("red_team_pending_payout"):
+		var payout: Dictionary = ctx.get_meta("red_team_pending_payout") as Dictionary
+		if payout.get("server_id", "") == _target_server.server_id:
+			var iid: String          = payout.get("card_instance_id", "")
+			var counter: String      = payout.get("counter", "credits")
+			var amount: int          = payout.get("amount", 3)
+			var self_card: InstalledCard = ctx.get_installed_card_by_instance_id(iid)
+			if self_card != null:
+				var available: int = self_card.get_counter(counter)
+				var taken: int     = min(amount, available)
+				if taken > 0:
+					self_card.remove_counter(counter, taken)
+					ctx.runner_credits += taken
+					ctx.log("Red Team: %s takes %d cr (%d remaining on Red Team)." % [
+						ctx.runner_name(), taken, self_card.get_counter(counter)
+					])
+
 	await _breach_server()
 	await _phase_end()
 
@@ -231,6 +249,12 @@ func _phase_end() -> void:
 
 	# Final cleanup triggers
 	await ctx.notify_event("run_end", {"server_id": _target_server.server_id, "successful": ctx.run_successful}, interpreter)
+
+	# Return unspent Overclock credits to the bank (they don't carry over)
+	var overclock_remaining: int = ctx.run_modifiers.get("overclock_credits", 0)
+	if overclock_remaining > 0:
+		ctx.log("Overclock: %d unspent credit(s) returned to the bank." % overclock_remaining)
+
 	ctx.run_ended      = false
 	ctx.run_modifiers  = {}   # clear all run-scoped modifiers
 
@@ -241,27 +265,38 @@ func _breach_server() -> void:
 	ctx.log("[Breach] Runner breaches %s." % _target_server.display_name())
 
 	var access_list: Array = _target_server.get_root_access_cards()
+	var _hq_accessed_indices: Array = []   # tracks HQ hand indices already in access_list
 
 	match _target_server.server_id:
 		"hq":
 			if not ctx.corp_hand.is_empty():
 				var idx: int = randi() % ctx.corp_hand.size()
 				access_list.append(ctx.corp_hand[idx])
+				_hq_accessed_indices.append(idx)
 		"rd":
 			if not ctx.corp_deck.is_empty():
 				access_list.append(ctx.corp_deck[0])
 		"archives":
+			# Per rules: before accessing, all facedown cards in Archives are turned faceup.
+			if not ctx.corp_discard_facedown.is_empty():
+				ctx.log("[Breach] Corp turns %d facedown card(s) in Archives faceup." % ctx.corp_discard_facedown.size())
+				ctx.corp_discard_facedown.clear()
 			access_list.append_array(ctx.corp_discard)
 
-	# Apply bonus access from run modifiers (e.g. Jailbreak, Conduit)
+	# Apply bonus access from run modifiers (e.g. Docklands Pass, Jailbreak, Conduit)
 	var bonus_access: int = ctx.run_modifiers.get("bonus_access", 0)
 	if bonus_access > 0:
 		match _target_server.server_id:
 			"hq":
-				for i in range(bonus_access):
-					if not ctx.corp_hand.is_empty():
-						var idx: int = randi() % ctx.corp_hand.size()
-						access_list.append(ctx.corp_hand[idx])
+				var available: Array = []
+				for i in range(ctx.corp_hand.size()):
+					if i not in _hq_accessed_indices:
+						available.append(i)
+				available.shuffle()
+				for i in range(min(bonus_access, available.size())):
+					var pick_idx: int = available[i]
+					access_list.append(ctx.corp_hand[pick_idx])
+					_hq_accessed_indices.append(pick_idx)
 			"rd":
 				for i in range(bonus_access):
 					if i + 1 < ctx.corp_deck.size():
@@ -304,9 +339,17 @@ func _access_card(card: Variant) -> void:
 	# Universal framework dispatch trigger
 	await ctx.notify_event("access_card", {"card_id": card_id, "runtime_instance_id": instance_id}, interpreter)
 
-	var on_access_def = ability_registry.get_on_access(card_id)
-	if on_access_def != null:
-		await interpreter.execute_trigger(on_access_def as Dictionary, ctx)
+	# on_access abilities only fire when the card is accessed while installed (not from Archives/heap)
+	# A card accessed from Archives is a CardRecord or a dict without a live server reference.
+	var is_installed: bool = (card is InstalledCard)
+	if is_installed:
+		var on_access_def = ability_registry.get_on_access(card_id)
+		if on_access_def != null:
+			await interpreter.execute_trigger(on_access_def as Dictionary, ctx)
+
+	# Stop immediately if damage caused a flatline
+	if ctx.game_over:
+		return
 
 	if card_record == null:
 		return
@@ -314,9 +357,24 @@ func _access_card(card: Variant) -> void:
 	if card_record.is_agenda():
 		await _steal_agenda(card_record)
 	elif card_record.is_asset() or card_record.card_type == "upgrade":
-		await _offer_trash(card, card_record)
+		# Don't offer trash for cards already in Archives
+		if is_installed:
+			await _offer_trash(card, card_record)
 
-	emit_signal("card_accessed", card if card is InstalledCard else null)
+	# Stop if game ended during steal or trash resolution
+	if ctx.game_over:
+		return
+
+	# Determine outcome for display
+	var _outcome := "accessed"
+	if card_record != null and card_record.is_agenda():
+		_outcome = "stolen"
+	emit_signal("card_accessed", card_record, _outcome)
+
+	# Wait for the UI to finish displaying this card before accessing the next one.
+	if ctx.has_meta("on_card_display_done"):
+		var cb: Callable = ctx.get_meta("on_card_display_done") as Callable
+		await cb.call(card_record, _outcome)
 
 func _steal_agenda(card_record: CardRecord) -> void:
 	ctx.log("[Access] Runner steals %s! (%d agenda points)" % [
@@ -337,8 +395,9 @@ func _steal_agenda(card_record: CardRecord) -> void:
 	if on_steal_def != null:
 		await interpreter.execute_trigger(on_steal_def as Dictionary, ctx)
 
-	if ctx.runner_agenda_points() >= 7:
-		ctx.log("Runner wins! 7 agenda points scored.")
+	# Check if runner has won by stealing this agenda
+	if ctx.runner_agenda_points() >= ctx.agenda_points_to_win:
+		ctx.log("Runner wins by stealing agendas!")
 		ctx.game_over = true
 		ctx.winner    = "runner"
 
@@ -347,9 +406,9 @@ func _offer_trash(card: Variant, card_record: CardRecord) -> void:
 	if card_record.trash_cost < 0:
 		return
 	ctx.log("[Access] Runner may trash %s for %d credits (Runner has %d)." % [
-		card_record.title, card_record.trash_cost, ctx.runner_credits
+		card_record.title, card_record.trash_cost, ctx.runner_available_credits()
 	])
-	if ctx.runner_credits < card_record.trash_cost:
+	if ctx.runner_available_credits() < card_record.trash_cost:
 		ctx.log("[Access] Runner cannot afford to trash.")
 		return
 
@@ -358,14 +417,17 @@ func _offer_trash(card: Variant, card_record: CardRecord) -> void:
 		should_trash = await ctx.runner_decision_maker.choose_trash(card_record, ctx)
 
 	if should_trash:
-		ctx.set_credits("runner", ctx.runner_credits - card_record.trash_cost)
+		ctx.runner_spend_credits(card_record.trash_cost)
 		ctx.log("[Access] Runner trashes %s." % card_record.title)
 		if card is InstalledCard:
 			var installed: InstalledCard = card as InstalledCard
 			var server: Server = ctx.get_server(installed.server_id)
 			if server:
 				server.remove_from_root(installed)
-			ctx.corp_discard.append(card_record)
+			# Unrezzed cards go facedown in Archives
+			if not installed.is_rezzed:
+				ctx.corp_discard_facedown[card_record.title] = true
+		ctx.corp_discard.append(card_record)
 
 
 # ── Decision windows ──────────────────────────────────────────────────────────
