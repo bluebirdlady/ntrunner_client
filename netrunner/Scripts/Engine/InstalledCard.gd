@@ -13,6 +13,10 @@ var counters:    Dictionary = {}    # {"advancement": 0, "power": 0, "credits": 
 var server_id:   String     = ""    # "hq" | "rd" | "archives" | "remote_0" etc.
 var zone:        String     = ""    # "ice" | "root"
 var runtime_instance_id: String = ""
+# Programs hosted on this ice card (Botulus, Tranquilizer)
+var hosted_cards: Array = []        # Array[InstalledCard]
+# If non-empty, this card is hosted on the ice with this instance_id
+var hosted_on_id: String = ""
 
 static func make_runtime_instance(record: CardRecord, srv_id: String, srv_zone: String, rezzed: bool = false) -> InstalledCard:
 	var c = InstalledCard.make(record, srv_id, srv_zone, rezzed)
@@ -30,6 +34,8 @@ static func make(record: CardRecord, srv_id: String, srv_zone: String, rezzed: b
 	c.zone       = srv_zone
 	c.is_rezzed  = rezzed
 	c.counters   = {"advancement": 0, "power": 0, "credits": 0}
+	c.hosted_cards = []
+	c.hosted_on_id = ""
 	return c
 
 

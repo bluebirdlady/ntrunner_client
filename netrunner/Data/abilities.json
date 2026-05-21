@@ -119,7 +119,15 @@
 			"cost": 1,
 			"strength_gained": 1,
 			"strength_gained_modifier": "installed_icebreaker_count"
-		}
+		},
+		"passive_modifiers": [
+			{
+				"type": "dynamic_base_strength",
+				"card_id": "unity",
+				"method": "installed_icebreaker_count",
+				"conditions": {}
+			}
+		]
 	},
 	"carmen": {
 		"break": {
@@ -918,5 +926,292 @@
 		]
 	},
 	"the_syndicate_profit_over_principle": {},
-	"the_catalyst_convention_breaker": {}
+	"the_catalyst_convention_breaker": {},
+	"botulus": {
+		"install_on_ice": true,
+		"corp_turn_start": {
+			"effects": [
+				{
+					"type": "add_self_counters",
+					"counter": "virus",
+					"amount": 1
+				}
+			]
+		},
+		"break": {
+			"subtype_restriction": null,
+			"cost_per_sub": 0,
+			"cost_virus_counter": 1,
+			"subs_per_use": 1,
+			"host_only": true
+		},
+		"on_rez": {
+			"effects": [
+				{
+					"type": "add_self_counters",
+					"counter": "virus",
+					"amount": 1
+				}
+			]
+		}
+	},
+	"tranquilizer": {
+		"install_on_ice": true,
+		"corp_turn_start": {
+			"effects": [
+				{
+					"type": "derez_host_ice"
+				}
+			]
+		},
+		"on_derez": {
+			"effects": [
+				{
+					"type": "self_trash"
+				}
+			]
+		}
+	},
+	"wildcat_strike": {
+		"on_play": {
+			"chooser": "corp",
+			"modes": [
+				{
+					"label": "Runner draws 4 cards",
+					"effects": [
+						{
+							"type": "draw_cards",
+							"params": {
+								"subject": "runner",
+								"amount": 4
+							}
+						}
+					]
+				},
+				{
+					"label": "Runner gains 4 credits",
+					"effects": [
+						{
+							"type": "gain_credits",
+							"params": {
+								"subject": "runner",
+								"amount": 4
+							}
+						}
+					]
+				}
+			],
+			"max_choices": 1
+		}
+	},
+	"echelon": {
+		"break": {
+			"subtype_restriction": "code_gate",
+			"cost_per_sub": 1,
+			"subs_per_use": 1
+		},
+		"boost": {
+			"cost": 1,
+			"strength_gained": 2
+		},
+		"passive_modifiers": [
+			{
+				"type": "dynamic_base_strength",
+				"card_id": "echelon",
+				"method": "installed_icebreaker_count",
+				"conditions": {}
+			}
+		]
+	},
+	"marjanah": {
+		"break": {
+			"subtype_restriction": "barrier",
+			"cost_per_sub": 2,
+			"subs_per_use": 1
+		},
+		"boost": {
+			"cost": 1,
+			"strength_gained": 1
+		},
+		"pass_ice": {
+			"effects": [
+				{
+					"type": "add_self_counters",
+					"counter": "power",
+					"amount": 1
+				}
+			]
+		}
+	},
+	"pantograph": {
+		"corp_scores_agenda": {
+			"effects": [
+				{
+					"type": "install_from_grip_free"
+				}
+			]
+		}
+	},
+	"anoetic_void": {
+		"before_breach": {
+			"effects": [
+				{
+					"type": "corp_may_end_breach",
+					"params": {
+						"cost_credits": 2,
+						"cost_trash_hq": 2
+					}
+				}
+			]
+		}
+	},
+	"tao_salonga": {
+		"successful_run": {
+			"effects": [
+				{
+					"type": "may_swap_two_ice"
+				}
+			]
+		}
+	},
+	"rene_loup_arcemont": {
+		"runner_trashes_during_breach": {
+			"effects": [
+				{
+					"type": "gain_credits_first_trash_this_turn",
+					"params": {
+						"amount": 2
+					}
+				}
+			]
+		}
+	},
+	"dzmz_optimizer": {
+		"_note": "First program install each turn costs 1cr less. Handled in TurnManager._do_install."
+	},
+	"fermenter": {
+		"on_rez": {
+			"effects": [
+				{
+					"type": "add_self_counters",
+					"counter": "virus",
+					"amount": 1
+				}
+			]
+		},
+		"runner_turn_start": {
+			"effects": [
+				{
+					"type": "add_self_counters",
+					"counter": "virus",
+					"amount": 1
+				}
+			]
+		},
+		"click_action": {
+			"label": "Fermenter: [trash] Gain 2cr per virus counter",
+			"subject": "runner",
+			"effects": [
+				{
+					"type": "gain_credits_per_counter",
+					"counter": "virus",
+					"credits_per": 2
+				},
+				{
+					"type": "self_trash"
+				}
+			]
+		}
+	},
+	"cookbook": {
+		"runner_installs_virus": {
+			"effects": [
+				{
+					"type": "add_counters_to_installed_virus",
+					"counter": "virus",
+					"amount": 1
+				}
+			]
+		}
+	},
+	"carnivore": {
+		"passive_modifiers": [
+			{
+				"type": "mu_bonus",
+				"value": 1,
+				"conditions": {}
+			}
+		],
+		"access_interrupt": {
+			"once_per_turn": true,
+			"effects": [
+				{
+					"type": "may_trash_accessed_by_discarding",
+					"params": {
+						"grip_cost": 2
+					}
+				}
+			]
+		}
+	},
+	"orbital_superiority": {
+		"on_score": {
+			"effects": [
+				{
+					"type": "deal_damage",
+					"params": {
+						"damage_type": "meat",
+						"amount": 4
+					}
+				}
+			]
+		}
+	},
+	"clearinghouse": {
+		"corp_turn_start": {
+			"effects": [
+				{
+					"type": "clearinghouse_activate"
+				}
+			]
+		}
+	},
+	"pharos": {
+		"subroutines": [
+			{
+				"label": "Give the Runner 1 tag.",
+				"effects": [
+					{
+						"type": "give_tags",
+						"params": {
+							"amount": 1
+						}
+					}
+				]
+			},
+			{
+				"label": "End the run.",
+				"effects": [
+					{
+						"type": "end_run"
+					}
+				]
+			},
+			{
+				"label": "Give the Runner 2 tags. End the run.",
+				"require_advancement": 3,
+				"effects": [
+					{
+						"type": "give_tags",
+						"params": {
+							"amount": 2
+						}
+					},
+					{
+						"type": "end_run"
+					}
+				]
+			}
+		]
+	}
 }

@@ -134,12 +134,12 @@ func _phase_encounter_ice(ice_card: InstalledCard) -> void:
 		await _phase_end()
 		return
 
-	var subroutines: Array = ability_registry.get_subroutines(ice_card.card_id)
+	var subroutines: Array = ability_registry.get_subroutines_for_card(ice_card.card_id, ice_card)
 	if subroutines.is_empty():
 		ctx.log("[Encounter] %s has no implemented subroutines — treating as blank." % ice_card.display_name())
 	else:
 		# Build encounter state with available icebreakers
-		var encounter := EncounterState.make(ice_card, subroutines, ctx.runner_rig, ctx)
+		var encounter := EncounterState.make(ice_card, subroutines, ctx.all_programs_for_encounter(ice_card), ctx)
 		emit_signal("encounter_started", encounter)
 
 		# Iterative break loop — runner acts until they pass
@@ -264,6 +264,15 @@ func _phase_end() -> void:
 func _breach_server() -> void:
 	ctx.log("[Breach] Runner breaches %s." % _target_server.display_name())
 
+	# Fire before_breach interrupt — allows Anoetic Void to end the breach early
+	await ctx.notify_event("before_breach", {
+		"server_id": _target_server.server_id
+	}, interpreter)
+
+	if ctx.run_modifiers.get("breach_cancelled", false):
+		ctx.log("[Breach] Breach ended before access (Corp ability).")
+		return
+
 	var access_list: Array = _target_server.get_root_access_cards()
 	var _hq_accessed_indices: Array = []   # tracks HQ hand indices already in access_list
 
@@ -354,6 +363,49 @@ func _access_card(card: Variant) -> void:
 	if card_record == null:
 		return
 
+	# Carnivore: runner may trash 2 from grip to trash this card (once per turn)
+	if not ctx.runner_carnivore_used_this_turn and not card_record.is_agenda():
+		var carnivore_installed := false
+		for rig_card in ctx.runner_rig:
+			var c: InstalledCard = rig_card as InstalledCard
+			if c != null and c.card_id == "carnivore":
+				carnivore_installed = true
+				break
+		if carnivore_installed and ctx.runner_hand.size() >= 2:
+			var use_carnivore := false
+			if ctx.runner_decision_maker != null and ctx.runner_decision_maker.has_method("choose_carnivore"):
+				use_carnivore = await ctx.runner_decision_maker.choose_carnivore(card_record, ctx)
+			if use_carnivore:
+				# Trash 2 cards from grip
+				for i in range(2):
+					if ctx.runner_hand.is_empty():
+						break
+					var discarded: Dictionary = ctx.runner_hand.pop_back() as Dictionary
+					var r: CardRecord = discarded.get("card_record", null) as CardRecord
+					if r:
+						ctx.runner_discard.append(r)
+						ctx.log("Carnivore: trashes %s from grip." % r.title)
+				ctx.runner_carnivore_used_this_turn = true
+				# Trash the accessed card
+				if card is InstalledCard:
+					var installed: InstalledCard = card as InstalledCard
+					var server: Server = ctx.get_server(installed.server_id)
+					if server:
+						server.remove_from_root(installed)
+					ctx.corp_discard.append(card_record)
+					ctx.log("Carnivore: trashes %s." % card_record.title)
+					# Fire Loup trigger
+					await ctx.notify_event("runner_trashes_during_breach", {
+						"card_id": card_record.id
+					}, interpreter)
+				# Skip normal steal/trash flow for this card
+				var _outcome_c := "accessed"
+				emit_signal("card_accessed", card_record, _outcome_c)
+				if ctx.has_meta("on_card_display_done"):
+					var cb: Callable = ctx.get_meta("on_card_display_done") as Callable
+					await cb.call(card_record, _outcome_c)
+				return
+
 	if card_record.is_agenda():
 		await _steal_agenda(card_record)
 	elif card_record.is_asset() or card_record.card_type == "upgrade":
@@ -424,10 +476,23 @@ func _offer_trash(card: Variant, card_record: CardRecord) -> void:
 			var server: Server = ctx.get_server(installed.server_id)
 			if server:
 				server.remove_from_root(installed)
+			# Cascade-trash any runner programs hosted on this ice
+			if installed.zone == "ice" and not installed.hosted_cards.is_empty():
+				for hosted in installed.hosted_cards.duplicate():
+					var h: InstalledCard = hosted as InstalledCard
+					ctx.runner_rig.erase(h)
+					ctx.unregister_all_card_effects(h.runtime_instance_id)
+					ctx.log("  %s trashed (host ice removed)." % h.display_name())
+				installed.hosted_cards.clear()
 			# Unrezzed cards go facedown in Archives
 			if not installed.is_rezzed:
 				ctx.corp_discard_facedown[card_record.title] = true
 		ctx.corp_discard.append(card_record)
+
+		# Fire trash-during-breach event (Loup identity ability)
+		await ctx.notify_event("runner_trashes_during_breach", {
+			"card_id": card_record.id
+		}, interpreter)
 
 
 # ── Decision windows ──────────────────────────────────────────────────────────

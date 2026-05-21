@@ -3,6 +3,8 @@ extends Node
 
 @onready var game_ui: CanvasLayer = $GameUI
 
+signal game_finished
+
 var ctx: GameContext
 var ability_registry: AbilityRegistry
 var turn_manager: TurnManager
@@ -10,7 +12,31 @@ var run_machine: RunStateMachine
 var runner_brain: HumanDecisionMaker
 var _run_scene: RunScene = null
 
+# ── Campaign mode ─────────────────────────────────────────────────────────────
+var campaign_mode:        bool     = false
+var campaign_runner_deck: Array    = []
+var campaign_runner_id:   String   = ""
+var campaign_corp_deck:   Array    = []
+var campaign_corp_id:     String   = ""
+var game_over_callback:   Callable
+
+
 func _ready() -> void:
+	if campaign_mode:
+		return   # CampaignController calls start_campaign_game() after ready
+
+func start_standalone_game() -> void:
+	_init_and_start()
+
+func start_campaign_game() -> void:
+	_init_and_start()
+
+
+func _ready_standalone() -> void:
+	_init_and_start()
+
+
+func _init_and_start() -> void:
 	ctx = GameContext.new()
 	ability_registry = AbilityRegistry.new()
 	if not ability_registry.load_from_file("res://Data/abilities.json"):
@@ -24,7 +50,10 @@ func _ready() -> void:
 	ctx.corp_decision_maker   = corp_brain
 	ctx.runner_decision_maker = runner_brain
 
-	_populate_test_state()
+	if campaign_mode:
+		_populate_campaign_state()
+	else:
+		_populate_test_state()
 
 	ctx.servers["hq"]       = Server.make("hq")
 	ctx.servers["rd"]       = Server.make("rd")
@@ -33,6 +62,8 @@ func _ready() -> void:
 	turn_manager = TurnManager.new(ctx, ability_registry)
 	run_machine  = RunStateMachine.new(ctx, ability_registry)
 	ctx.set_meta("run_state_machine", run_machine)
+	ctx.set_meta("ability_registry", ability_registry)
+	ctx.set_meta("register_installed_card", Callable(turn_manager, "_register_card_listeners"))
 
 	game_ui.setup(ctx, turn_manager, run_machine, ability_registry)
 
@@ -68,6 +99,12 @@ func _wire_proxies_to_game_ui() -> void:
 		return await game_ui.show_payment_option_prompt(options)
 	runner_brain.choose_server_proxy = func(allowed: Array) -> String:
 		return await game_ui.show_server_choice_prompt(allowed)
+	runner_brain.choose_card_from_hand_proxy = func(hand: Array) -> Variant:
+		return await game_ui.show_choose_from_hand_prompt(hand, "Pantograph: choose a card to install for free (or decline)")
+	runner_brain.ice_swap_proxy = func(eligible_servers: Array) -> Variant:
+		return await game_ui.show_ice_swap_prompt(eligible_servers)
+	runner_brain.carnivore_proxy = func(card_record: CardRecord) -> bool:
+		return await game_ui.show_carnivore_prompt(card_record)
 
 
 func _wire_proxies_to_run_scene(run_scene: RunScene) -> void:
@@ -85,6 +122,8 @@ func _wire_proxies_to_run_scene(run_scene: RunScene) -> void:
 		return await run_scene.show_payment_option_prompt(options)
 	runner_brain.choose_server_proxy = func(allowed: Array) -> String:
 		return await run_scene.show_server_choice_prompt(allowed)
+	runner_brain.choose_card_from_hand_proxy = func(hand: Array) -> Variant:
+		return await game_ui.show_choose_from_hand_prompt(hand, "Choose a card to install")
 
 
 # ── Run scene lifecycle ───────────────────────────────────────────────────────
@@ -137,8 +176,38 @@ func _on_run_scene_complete() -> void:
 func _start_game_loop() -> void:
 	await turn_manager.run_game()
 
+	# Notify campaign controller on game end
+	if campaign_mode and game_over_callback.is_valid():
+		game_over_callback.call(ctx.winner == "runner")
+	else:
+		game_finished.emit()
 
 # ── Test state ────────────────────────────────────────────────────────────────
+
+func _populate_campaign_state() -> void:
+	ctx.corp_credits   = 5
+	ctx.runner_credits = 5
+	ctx.corp_clicks    = 3
+	ctx.runner_clicks  = 0
+
+	# Identities from campaign config
+	ctx.runner_identity = CardRegistry.get_card(campaign_runner_id)
+	ctx.corp_identity   = CardRegistry.get_card(campaign_corp_id)
+
+	_load_deck_from_ids(campaign_corp_deck,    ctx.corp_deck)
+	_load_deck_from_ids(campaign_runner_deck,  ctx.runner_deck)
+	ctx.corp_deck.shuffle()
+	ctx.runner_deck.shuffle()
+
+	for i in range(5):
+		if not ctx.corp_deck.is_empty():
+			var card: CardRecord = ctx.corp_deck.pop_front()
+			ctx.corp_hand.append({"card_id": card.id, "card_record": card})
+	for i in range(5):
+		if not ctx.runner_deck.is_empty():
+			var card: CardRecord = ctx.runner_deck.pop_front()
+			ctx.runner_hand.append({"card_id": card.id, "card_record": card})
+
 
 func _populate_test_state() -> void:
 	ctx.corp_credits   = 5

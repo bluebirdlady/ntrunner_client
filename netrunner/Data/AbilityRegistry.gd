@@ -70,6 +70,26 @@ func get_subroutines(card_id: String) -> Array:
 	var card_def: Dictionary = _abilities[card_id] as Dictionary
 	return card_def.get("subroutines", []) as Array
 
+
+# Returns subroutines filtered by the installed card's current state.
+# Used for cards like Pharos where subroutines are conditionally present.
+func get_subroutines_for_card(card_id: String, installed: InstalledCard) -> Array:
+	var all_subs: Array = get_subroutines(card_id)
+	if all_subs.is_empty() or installed == null:
+		return all_subs
+
+	var result: Array = []
+	for sub in all_subs:
+		var s: Dictionary = sub as Dictionary
+		# Check "require_advancement" condition — sub only exists if card has N+ counters
+		var required: int = s.get("require_advancement", 0)
+		if required > 0:
+			var actual: int = installed.get_counter("advancement")
+			if actual < required:
+				continue   # sub doesn't exist yet
+		result.append(s)
+	return result
+
 # Returns true if any ability is defined for this card.
 func has_definition(card_id: String) -> bool:
 	return _abilities.has(card_id)

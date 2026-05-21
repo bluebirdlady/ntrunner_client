@@ -25,6 +25,7 @@ var trash_proxy:             Callable
 var choose_modes_proxy:      Callable   # func(modes, max_choices) -> Array[int]
 var choose_server_proxy:      Callable   # func(allowed_servers) -> String
 var choose_card_from_hand_proxy:  Callable # func(hand) -> Dictionary
+var host_ice_proxy:           Callable   # func(candidates: Array[InstalledCard]) -> InstalledCard
 var choose_from_search_proxy:      Callable # func(candidates) -> CardRecord
 var choose_payment_option_proxy:   Callable # func(options) -> Dictionary or null
 
@@ -120,3 +121,36 @@ func choose_window_action(ctx: GameContext, actor: String, can_rez_ice: bool) ->
 						return GameAction.rez_card(c.card_id, iid)
 
 	return GameAction.pass_window()
+
+
+func choose_host_ice(ctx: GameContext) -> InstalledCard:
+	# Gather all installed ice across all Corp servers
+	var candidates: Array = []
+	for server in ctx.servers.values():
+		for ice in (server as Server).ice:
+			candidates.append(ice as InstalledCard)
+
+	if candidates.is_empty():
+		return null
+
+	# For now, default to first available ice; UI prompt will be wired via proxy
+	if host_ice_proxy.is_valid():
+		return await host_ice_proxy.call(candidates, ctx)
+
+	return candidates[0]
+
+
+var ice_swap_proxy: Callable   # func(eligible_servers: Array) -> Variant
+
+func choose_ice_swap(eligible_servers: Array, _ctx: GameContext) -> Variant:
+	if ice_swap_proxy.is_valid():
+		return await ice_swap_proxy.call(eligible_servers)
+	return null   # decline by default
+
+
+var carnivore_proxy: Callable   # func(card_record: CardRecord) -> bool
+
+func choose_carnivore(card_record: CardRecord, _ctx: GameContext) -> bool:
+	if carnivore_proxy.is_valid():
+		return await carnivore_proxy.call(card_record)
+	return false

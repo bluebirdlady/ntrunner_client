@@ -40,12 +40,25 @@ static func make(ice: InstalledCard, subs: Array, breakers: Array, game_ctx: Obj
 
 # Current effective strength of a breaker including temporary boosts and board modifiers
 func get_breaker_strength(breaker: InstalledCard) -> int:
-	var base: int  = breaker.card_record.strength if breaker.card_record != null else 0
+	# Check for dynamic base strength override (e.g. Echelon/Unity: strength = installed icebreakers)
+	var base: int = _resolve_breaker_base_strength(breaker)
+	# Permanent strength from power counters (e.g. Marjanah: +1 per ice passed)
+	var permanent: int = breaker.get_counter("power")
 	var boost: int = temp_strength_boosts.get(breaker.card_id, 0)
 	var board_bonus: int = 0
 	if ctx != null and ctx.has_method("query_breaker_strength_bonus"):
 		board_bonus = ctx.query_breaker_strength_bonus()
-	return base + boost + board_bonus
+	return base + permanent + boost + board_bonus
+
+
+func _resolve_breaker_base_strength(breaker: InstalledCard) -> int:
+	# Check if this specific breaker has a dynamic base strength modifier
+	if ctx != null and ctx.has_method("query_dynamic_breaker_base"):
+		var dynamic_base: int = ctx.query_dynamic_breaker_base(breaker)
+		if dynamic_base >= 0:
+			return dynamic_base
+	# Default: use printed strength from card record
+	return breaker.card_record.strength if breaker.card_record != null else 0
 
 
 # Whether a breaker meets or exceeds the ice strength

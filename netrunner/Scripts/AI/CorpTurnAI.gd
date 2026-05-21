@@ -299,21 +299,44 @@ func _find_any_installed_agenda(ctx: GameContext) -> InstalledCard:
 
 
 func choose_modes(modes: Array, max_choices: int, ctx: GameContext) -> Array:
-	# Heuristic: if we need credits more than cards, pick gain_credits; else draw.
-	# For now: prefer credits if below economy threshold, else draw.
+	# Detect if this is a "Corp chooses on Runner's turn" situation (e.g. Wildcat Strike).
+	# In that case, pick whichever option hurts the Runner most.
+	var is_adversarial: bool = ctx.active_player == "runner"
+
+	if is_adversarial:
+		# Deny what the Runner needs most:
+		# - If Runner has few credits (≤3), deny credits → pick draw
+		# - If Runner has large hand (≥4 cards), deny draw → pick credits
+		# - Otherwise, deny credits (economy denial is usually stronger)
+		var deny_credits: bool = ctx.runner_credits <= 3
+		var deny_draw:    bool = ctx.runner_hand.size() >= 4
+		for i in range(modes.size()):
+			var label: String = (modes[i] as Dictionary).get("label", "").to_lower()
+			if deny_credits and "credit" in label:
+				ctx.log("[Wildcat Strike] Corp denies credits — Runner draws instead.")
+				return [i]
+			if deny_draw and "draw" in label:
+				ctx.log("[Wildcat Strike] Corp denies draws — Runner gains credits instead.")
+				return [i]
+		# Default: deny credits (economy denial)
+		for i in range(modes.size()):
+			if "credit" in (modes[i] as Dictionary).get("label", "").to_lower():
+				ctx.log("[Wildcat Strike] Corp denies credits by default.")
+				return [i]
+		return [0]
+
+	# Normal Corp-turn modal: pick based on Corp's own needs
 	var want_credits: bool = ctx.corp_credits < ECONOMY_THRESHOLD
 	var result: Array = []
 	for i in range(min(max_choices, modes.size())):
 		var mode: Dictionary = modes[i] as Dictionary
 		var label: String = mode.get("label", "").to_lower()
-		# Simple label-based heuristic
 		if want_credits and "credit" in label:
 			result.append(i)
 			break
 		elif not want_credits and "draw" in label:
 			result.append(i)
 			break
-	# Fallback: first mode
 	if result.is_empty():
 		result.append(0)
 	return result
@@ -353,3 +376,43 @@ func _find_corp_click_action(ctx: GameContext) -> InstalledCard:
 			if c.get_counter("credits") > 0:
 				return c
 	return null
+
+
+func choose_use_anoetic_void(ctx: GameContext) -> bool:
+	# Use Anoetic Void if we can afford the tempo hit and the breach is dangerous.
+	# Heuristic: use it if runner has 4+ agenda points (close to winning)
+	# or the server being breached has an agenda installed.
+	if ctx.corp_credits < 4:   # need 2cr + want some reserve
+		return false
+	if ctx.corp_hand.size() < 2:
+		return false
+	# Always use it if runner is close to winning
+	if ctx.runner_agenda_points() >= ctx.agenda_points_to_win - 2:
+		return true
+	# Use it if the breached server has an agenda
+	var breach_server_id: String = ctx.current_event_data.get("server_id", "")
+	var server: Server = ctx.get_server(breach_server_id)
+	if server != null:
+		for card in server.root:
+			var c: InstalledCard = card as InstalledCard
+			if c != null and c.card_record != null and c.card_record.is_agenda():
+				return true
+	return false
+
+
+func choose_activate_clearinghouse(card: InstalledCard, ctx: GameContext) -> bool:
+	# Activate if the damage would flatline or nearly flatline the runner,
+	# OR if the runner is close to winning (desperate times).
+	var counters: int    = card.get_counter("advancement") + 1   # +1 for counter we add
+	var runner_grip: int = ctx.runner_hand.size()
+
+	# Always activate if it kills
+	if counters >= runner_grip:
+		return true
+
+	# Activate if runner is 1 steal away from winning and we have 3+ counters
+	if ctx.runner_agenda_points() >= ctx.agenda_points_to_win - 2 and counters >= 3:
+		return true
+
+	# Otherwise hold — let it grow more threatening
+	return false

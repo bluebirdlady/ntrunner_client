@@ -58,6 +58,11 @@ func run_game() -> void:
 	else:
 		agenda_points_to_win = 7
 		ctx.agenda_points_to_win = 7
+
+	# Register identity ability listeners using synthetic instance IDs
+	_register_identity_listeners("identity_runner", runner_id)
+	_register_identity_listeners("identity_corp",   corp_id)
+
 	while not ctx.game_over:
 		await _corp_turn()
 		if ctx.game_over:
@@ -146,6 +151,9 @@ func _runner_turn() -> void:
 	ctx.runner_centrals_run_this_turn = []             # reset each turn
 	ctx.runner_click_draws_this_turn  = 0              # reset each turn
 	ctx.runner_hq_breached_this_turn  = false          # reset each turn
+	ctx.runner_trashed_during_breach_this_turn = false  # reset each turn (Loup)
+	ctx.runner_program_install_discounted_this_turn = false  # reset each turn (DZMZ)
+	ctx.runner_carnivore_used_this_turn = false              # reset each turn
 	if runner_penalty > 0:
 		ctx.log("%s loses %d click(s) this turn (deferred penalty)." % [ctx.runner_name(), runner_penalty])
 	ctx.turn_number   += 1
@@ -334,11 +342,23 @@ func _do_install(player: String, action: GameAction) -> void:
 
 		print("Player install: card is: ", record.title, " and charged cost is: ", pay_cost)
 
-		# MU check for programs
+		# DZMZ Optimizer: first program install each turn costs 1cr less
+		if record.card_type == "program" and not ctx.runner_program_install_discounted_this_turn:
+			var has_dzmz := false
+			for rig_card in ctx.runner_rig:
+				var c: InstalledCard = rig_card as InstalledCard
+				if c != null and c.card_id == "dzmz_optimizer":
+					has_dzmz = true
+					break
+			if has_dzmz:
+				pay_cost = max(0, pay_cost - 1)
+				ctx.runner_program_install_discounted_this_turn = true
+				ctx.log("DZMZ Optimizer: %s costs 1 less (now %d¢)." % [record.title, pay_cost])
+
+		# MU check for programs (hosted-on-ice programs still use MU)
 		if record.card_type == "program" and record.memory_cost > 0:
 			var mu_needed: int = record.memory_cost
 			if ctx.runner_mu_available() < mu_needed:
-				# Runner may trash installed programs to make room — for now, reject if not enough MU
 				ctx.log("%s cannot install %s — not enough MU (%d needed, %d available, %d total)." % [
 					ctx.runner_name(), record.title,
 					mu_needed, ctx.runner_mu_available(), ctx.runner_total_mu()
@@ -349,8 +369,38 @@ func _do_install(player: String, action: GameAction) -> void:
 			ctx.log("%s cannot afford to install %s." % [ctx.runner_name(), record.title])
 			return
 		ctx.runner_credits -= pay_cost
+
+		# Check if this card must be hosted on a specific ice card
+		var must_host_on_ice: bool = card_def.get("install_on_ice", false)
+		var host_ice: InstalledCard = null
+		if must_host_on_ice:
+			# Ask the runner to choose a target ice
+			if ctx.runner_decision_maker != null and ctx.runner_decision_maker.has_method("choose_host_ice"):
+				host_ice = await ctx.runner_decision_maker.choose_host_ice(ctx)
+			if host_ice == null:
+				# No valid target — find any installed ice
+				for server in ctx.servers.values():
+					for ice in (server as Server).ice:
+						host_ice = ice as InstalledCard
+						break
+					if host_ice != null:
+						break
+			if host_ice == null:
+				ctx.log("%s cannot install %s — no installed ice to host it." % [ctx.runner_name(), record.title])
+				ctx.runner_credits += pay_cost   # refund
+				return
+
 		var installed := InstalledCard.make_runtime_instance(record, "runner_rig", "root", true)
-		ctx.runner_rig.append(installed)
+
+		if must_host_on_ice and host_ice != null:
+			# Host on the chosen ice rather than the general rig
+			installed.hosted_on_id = host_ice.runtime_instance_id
+			installed.server_id    = host_ice.server_id   # same server as host
+			host_ice.hosted_cards.append(installed)
+			ctx.log("%s hosts %s on %s." % [ctx.runner_name(), record.title, host_ice.display_name()])
+		else:
+			ctx.runner_rig.append(installed)
+
 		_remove_from_hand(player, record)
 		_register_card_listeners(installed)
 		# Fire on_rez directly on this card only — never broadcast via notify_event
@@ -361,6 +411,12 @@ func _do_install(player: String, action: GameAction) -> void:
 			ctx.current_event_data = {}
 		emit_signal("card_installed", record, "runner_rig")
 		emit_signal("hand_changed", player)
+		# Fire runner_installs_virus for Cookbook
+		if record.card_type == "program" and record.has_subtype("virus"):
+			await ctx.notify_event("runner_installs_virus", {
+				"card": installed,
+				"card_instance_id": installed.runtime_instance_id
+			}, interpreter)
 		ctx.log("%s installs %s. [MU: %d/%d used]" % [
 			ctx.runner_name(), record.title, ctx.runner_mu_used(), ctx.runner_total_mu()
 		])
@@ -599,10 +655,19 @@ func _score_agenda(card: InstalledCard) -> void:
 		server.remove_from_root(card)
 		ctx.remove_empty_remote_servers()
 
-	# Fire on_score ability
+	# Fire on_score ability of the scored agenda
 	var on_score_def = ability_registry.get_on_score(record.id)
 	if on_score_def != null:
 		await interpreter.execute_trigger(on_score_def as Dictionary, ctx)
+
+	# Broadcast so runner cards (e.g. Pantograph) can respond
+	await ctx.notify_event("corp_scores_agenda", {
+		"agenda_id": record.id,
+		"agenda_points": record.agenda_points
+	}, interpreter)
+
+	# Check win condition immediately — Corp may have won by scoring
+	_check_win_conditions()
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -623,6 +688,21 @@ func _remove_from_hand(player: String, record: CardRecord) -> void:
 			return
 
 
+func _register_identity_listeners(instance_id: String, card_id: String) -> void:
+	if card_id == "":
+		return
+	var card_def: Dictionary = ability_registry._abilities.get(card_id, {}) as Dictionary
+	if card_def.is_empty():
+		return
+	for event_type in ["corp_turn_start", "runner_turn_start",
+					"encounter_ice", "pass_ice", "successful_run", "approach_server",
+					"run_end", "on_derez", "corp_scores_agenda", "before_breach",
+						"runner_trashes_during_breach", "runner_installs_virus"]:
+		var trigger_def = card_def.get(event_type, null)
+		if trigger_def != null:
+			ctx.register_listener(event_type, instance_id, trigger_def as Dictionary)
+
+
 func _register_card_listeners(installed: InstalledCard) -> void:
 	# Register all event listeners and passive modifiers for this card.
 	# Uses instance_id so effects can be cleaned up when the card leaves play.
@@ -633,20 +713,27 @@ func _register_card_listeners(installed: InstalledCard) -> void:
 	# Register triggered event listeners
 	for event_type in ["corp_turn_start", "runner_turn_start",
 						"encounter_ice", "pass_ice", "successful_run", "approach_server",
-						"run_end"]:
+						"run_end", "on_derez", "corp_scores_agenda", "before_breach",
+						"runner_trashes_during_breach", "runner_installs_virus"]:
 		var trigger_def = card_def.get(event_type, null)
 		if trigger_def != null:
 			ctx.register_listener(event_type, instance_id, trigger_def as Dictionary)
 
-	# Register passive modifiers (e.g. Turbine's breaker_strength boost)
+	# Register passive modifiers (e.g. Turbine's breaker_strength boost, Echelon's dynamic strength)
 	var modifiers: Array = card_def.get("passive_modifiers", []) as Array
 	for mod in modifiers:
 		var mod_dict: Dictionary = mod as Dictionary
+		var extra := {}
+		# Pass through any extra fields needed by dynamic modifiers
+		for key in ["card_id", "method"]:
+			if mod_dict.has(key):
+				extra[key] = mod_dict[key]
 		ctx.register_modifier(
 			mod_dict.get("type", ""),
 			instance_id,
 			mod_dict.get("value", 0),
-			mod_dict.get("conditions", {}) as Dictionary
+			mod_dict.get("conditions", {}) as Dictionary,
+			extra
 		)
 
 

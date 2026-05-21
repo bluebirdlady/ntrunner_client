@@ -1,0 +1,138 @@
+{
+	"version": 1,
+	"arc": "runner",
+	"title": "CONVENTION BREAKER",
+	"subtitle": "A Runner Campaign",
+
+	"missions": [
+		{
+			"id": "act1_hb",
+			"title": "First Run",
+			"subtitle": "Kaguya Data Vault, Lunacent",
+			"act": 1,
+			"fiction_pre": "act1_pre",
+			"fiction_post": "act1_post",
+			"opponent_id": "hb_syndicate",
+			"unlocks_missions": ["act2a_weyland", "act2b_jinteki"],
+			"unlocks_cards": [],
+			"prerequisite_missions": []
+		},
+		{
+			"id": "act2a_weyland",
+			"title": "Rush Job",
+			"subtitle": "Blue Sun Helium-3 Processing, Heinlein Surface",
+			"act": 2,
+			"fiction_pre": "act2a_pre",
+			"fiction_post": "act2a_post",
+			"opponent_id": "weyland_built_to_last",
+			"unlocks_missions": [],
+			"unlocks_cards": [
+				"conduit", "daily_casts", "earthrise_hotel",
+				"mutual_favor", "leech", "k2cp_turbine"
+			],
+			"prerequisite_missions": ["act1_hb"]
+		},
+		{
+			"id": "act2b_jinteki",
+			"title": "Gachapon",
+			"subtitle": "Jinteki Research Division, Heinlein Network",
+			"act": 2,
+			"fiction_pre": "act2b_pre",
+			"fiction_post": "act2b_post",
+			"opponent_id": "jinteki_replicating",
+			"unlocks_missions": [],
+			"unlocks_cards": [
+				"conduit", "daily_casts", "earthrise_hotel",
+				"mutual_favor", "leech", "k2cp_turbine"
+			],
+			"prerequisite_missions": ["act1_hb"]
+		}
+	],
+
+	"opponents": {
+		"hb_syndicate": {
+			"name": "Haas-Bioroid",
+			"identity": "the_syndicate_profit_over_principle",
+			"description": "A Haas-Bioroid subsidiary. Efficient. Cold. They did not expect you.",
+			"deck": [
+				"offworld_office", "offworld_office", "offworld_office",
+				"send_a_message", "send_a_message",
+				"superconducting_hub", "superconducting_hub",
+				"nico_campaign", "nico_campaign",
+				"urtica_cipher", "urtica_cipher",
+				"regolith_mining_license", "regolith_mining_license",
+				"hedge_fund", "hedge_fund", "hedge_fund",
+				"government_subsidy", "government_subsidy",
+				"seamless_launch", "seamless_launch",
+				"manegarm_skunkworks",
+				"bran_1_0", "bran_1_0",
+				"diviner", "diviner",
+				"karuna", "karuna",
+				"palisade", "palisade", "palisade",
+				"whitespace", "whitespace",
+				"tithe", "tithe"
+			]
+		},
+		"weyland_built_to_last": {
+			"name": "Weyland Consortium",
+			"identity": "weyland_consortium_built_to_last",
+			"description": "They build things meant to last. Their ICE is no exception.",
+			"deck": [
+				"offworld_office", "offworld_office", "offworld_office",
+				"send_a_message", "send_a_message",
+				"superconducting_hub", "superconducting_hub",
+				"regolith_mining_license", "regolith_mining_license", "regolith_mining_license",
+				"hedge_fund", "hedge_fund", "hedge_fund",
+				"government_subsidy", "government_subsidy", "government_subsidy",
+				"seamless_launch", "seamless_launch",
+				"bran_1_0", "bran_1_0", "bran_1_0",
+				"palisade", "palisade", "palisade",
+				"ansel_1_0", "ansel_1_0",
+				"tithe", "tithe", "tithe",
+				"whitespace", "whitespace",
+				"diviner", "diviner"
+			]
+		},
+		"jinteki_replicating": {
+			"name": "Jinteki",
+			"identity": "jinteki_replicating_perfection",
+			"description": "Patience as a weapon. They will wait you out, or wear you down trying.",
+			"deck": [
+				"send_a_message", "send_a_message", "send_a_message",
+				"superconducting_hub", "superconducting_hub",
+				"urtica_cipher", "urtica_cipher", "urtica_cipher",
+				"nico_campaign", "nico_campaign", "nico_campaign",
+				"hedge_fund", "hedge_fund", "hedge_fund",
+				"government_subsidy", "government_subsidy",
+				"predictive_planogram", "predictive_planogram", "predictive_planogram",
+				"seamless_launch", "seamless_launch",
+				"manegarm_skunkworks", "manegarm_skunkworks",
+				"ansel_1_0", "ansel_1_0", "ansel_1_0",
+				"karuna", "karuna",
+				"diviner", "diviner", "diviner",
+				"tithe", "tithe"
+			]
+		}
+	},
+
+	"runner_starter_deck": [
+		"tread_lightly", "tread_lightly",
+		"creative_commission", "creative_commission",
+		"vrcation", "vrcation",
+		"overclock", "overclock",
+		"jailbreak", "jailbreak", "jailbreak",
+		"sure_gamble", "sure_gamble", "sure_gamble",
+		"docklands_pass",
+		"pennyshaver",
+		"red_team",
+		"telework_contract", "telework_contract",
+		"smartware_distributor", "smartware_distributor",
+		"verbal_plasticity",
+		"cleaver", "cleaver",
+		"carmen", "carmen",
+		"unity", "unity",
+		"mayfly", "mayfly"
+	],
+
+	"runner_identity": "the_catalyst_convention_breaker"
+}

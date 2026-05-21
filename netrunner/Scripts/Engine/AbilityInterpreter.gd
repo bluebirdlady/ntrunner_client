@@ -755,6 +755,286 @@ func _execute_effect(effect: Dictionary, ctx: GameContext, chosen_target: Varian
 			else:
 				push_error("AbilityInterpreter: trash_card has no valid target")
 
+		"install_from_grip_optional":
+			# Pantograph: runner may install a card from grip paying its install cost.
+			if ctx.runner_hand.is_empty():
+				ctx.log("Pantograph: no cards in grip to install.")
+				return
+			var dm: Object = ctx.runner_decision_maker
+			if dm == null:
+				return
+			var chosen: CardRecord = null
+			if dm.has_method("choose_card_from_hand"):
+				var entry: Variant = await dm.choose_card_from_hand(ctx.runner_hand, ctx)
+				if entry != null:
+					chosen = (entry as Dictionary).get("card_record", null) as CardRecord
+			if chosen == null:
+				ctx.log("Pantograph: runner declines to install.")
+				return
+			var cost: int = max(0, chosen.cost)
+			if ctx.runner_credits < cost:
+				ctx.log("Pantograph: cannot afford to install %s." % chosen.title)
+				return
+			ctx.runner_credits -= cost
+			var installed := InstalledCard.make_runtime_instance(chosen, "runner_rig", "root", true)
+			ctx.runner_rig.append(installed)
+			for i in range(ctx.runner_hand.size()):
+				var e: Dictionary = ctx.runner_hand[i] as Dictionary
+				if e.get("card_record", null) == chosen:
+					ctx.runner_hand.remove_at(i)
+					break
+			if ctx.has_meta("ability_registry"):
+				var ab_reg: AbilityRegistry = ctx.get_meta("ability_registry") as AbilityRegistry
+				var on_rez_def = ab_reg.get_on_rez(chosen.id)
+				if on_rez_def != null:
+					ctx.current_event_data = {"card": installed, "card_instance_id": installed.runtime_instance_id}
+					await execute_trigger(on_rez_def as Dictionary, ctx)
+					ctx.current_event_data = {}
+			ctx.log("Pantograph: %s installs %s for %d cr." % [ctx.runner_name(), chosen.title, cost])
+
+		"install_from_grip_free":
+			# Pantograph: install a card from grip ignoring install cost.
+			var installable: Array = []
+			for entry in ctx.runner_hand:
+				var e: Dictionary = entry as Dictionary
+				var r: CardRecord = e.get("card_record", null) as CardRecord
+				if r == null:
+					continue
+				if r.card_type in ["program", "hardware", "resource"]:
+					installable.append(entry)
+
+			if installable.is_empty():
+				ctx.log("Pantograph: no installable cards in grip.")
+				return
+
+			var chosen_entry: Variant = null
+			if ctx.runner_decision_maker != null and ctx.runner_decision_maker.has_method("choose_card_from_hand"):
+				chosen_entry = await ctx.runner_decision_maker.choose_card_from_hand(installable, ctx)
+
+			if chosen_entry == null:
+				ctx.log("Pantograph: no card chosen.")
+				return
+
+			var record: CardRecord = (chosen_entry as Dictionary).get("card_record", null) as CardRecord
+			if record == null:
+				return
+
+			# MU check for programs
+			if record.card_type == "program" and record.memory_cost > 0:
+				if ctx.runner_mu_available() < record.memory_cost:
+					ctx.log("Pantograph: not enough MU to install %s." % record.title)
+					return
+
+			# Remove from hand and install
+			ctx.runner_hand.erase(chosen_entry)
+			var installed := InstalledCard.make_runtime_instance(record, "runner_rig", "root", true)
+			ctx.runner_rig.append(installed)
+
+			# Register event listeners via TurnManager callback
+			if ctx.has_meta("register_installed_card"):
+				var reg: Callable = ctx.get_meta("register_installed_card") as Callable
+				reg.call(installed)
+
+			# Fire on_rez if defined
+			if ctx.has_meta("ability_registry"):
+				var reg: AbilityRegistry = ctx.get_meta("ability_registry") as AbilityRegistry
+				var on_rez_def = reg.get_on_rez(record.id)
+				if on_rez_def != null:
+					ctx.current_event_data = {"card": installed, "card_instance_id": installed.runtime_instance_id}
+					await execute_trigger(on_rez_def as Dictionary, ctx)
+					ctx.current_event_data = {}
+
+			ctx.log("Pantograph: %s installs %s for free. [MU: %d/%d]" % [
+				ctx.runner_name(), record.title,
+				ctx.runner_mu_used(), ctx.runner_total_mu()
+			])
+
+		"give_tags":
+			# Give the runner N tags.
+			var amount: int = _resolve_amount(params.get("amount", 1), ctx)
+			ctx.runner_tags += amount
+			ctx.log("%s takes %d tag(s). (%d total)" % [ctx.runner_name(), amount, ctx.runner_tags])
+
+		"clearinghouse_activate":
+			# Clearinghouse: At turn start, Corp may add 1 advancement counter,
+			# then deal 1 meat per counter and trash itself. Activation is optional.
+			var iid: String = ctx.current_event_data.get("card_instance_id", "")
+			var self_card   := ctx.get_installed_card_by_instance_id(iid)
+			if self_card == null and iid != "":
+				self_card = ctx.get_installed_card_by_id(iid)
+			if self_card == null:
+				return
+
+			# AI decision: activate if runner is close to winning or has many counters
+			# (threat grows each turn — AI should activate when it will be lethal or near-lethal)
+			var current_counters: int = self_card.get_counter("advancement")
+			var damage_if_activate: int = current_counters + 1   # +1 for the counter we're adding
+			var runner_grip: int = ctx.runner_hand.size()
+
+			var should_activate := false
+			if ctx.corp_decision_maker != null and ctx.corp_decision_maker.has_method("choose_activate_clearinghouse"):
+				should_activate = await ctx.corp_decision_maker.choose_activate_clearinghouse(self_card, ctx)
+			else:
+				# Default AI: activate if it would flatline (or near-flatline) the runner
+				should_activate = damage_if_activate >= runner_grip
+
+			if not should_activate:
+				ctx.log("Clearinghouse: Corp holds. (%d counters, would deal %d meat)" % [
+					current_counters, damage_if_activate
+				])
+				return
+
+			# Activate: add 1 counter first
+			self_card.add_counter("advancement", 1)
+			var total_damage: int = self_card.get_counter("advancement")
+			ctx.log("Clearinghouse fires! Deals %d meat damage." % total_damage)
+
+			# Deal meat damage
+			_deal_damage("meat", total_damage, ctx)
+
+			# Trash Clearinghouse (mandatory after activating)
+			var server: Server = ctx.get_server(self_card.server_id)
+			if server:
+				server.remove_from_root(self_card)
+				ctx.remove_empty_remote_servers()
+			ctx.unregister_all_card_effects(self_card.runtime_instance_id)
+			if self_card.card_record != null:
+				ctx.corp_discard.append(self_card.card_record)
+			ctx.log("Clearinghouse is trashed.")
+			# Tranquilizer: derez the ice this program is hosted on.
+			# Fires at the start of the Corp's turn while installed.
+			if self_card == null:
+				self_card = ctx.get_installed_card_by_id(iid)
+			if self_card != null and self_card.hosted_on_id != "":
+				var host_ice := ctx.get_ice_by_instance_id(self_card.hosted_on_id)
+				if host_ice != null and host_ice.is_rezzed:
+					host_ice.is_rezzed = false
+					ctx.log("Tranquilizer: %s is derezzed." % host_ice.display_name())
+					await ctx.notify_event("on_derez", {
+						"card": host_ice,
+						"card_instance_id": self_card.runtime_instance_id
+					}, self)
+				elif host_ice != null:
+					ctx.log("Tranquilizer: %s is already unrezzed." % host_ice.display_name())
+
+		"gain_credits_per_counter":
+			# Fermenter: gain 2cr for each hosted virus counter, then card trashes itself.
+			var counter_type: String = effect.get("counter", "virus")
+			var credits_per: int     = int(effect.get("credits_per", params.get("credits_per", 2)))
+			var iid: String = ctx.current_event_data.get("card_instance_id", "")
+			var self_card   := ctx.get_installed_card_by_instance_id(iid)
+			if self_card == null and iid != "":
+				self_card = ctx.get_installed_card_by_id(iid)
+			if self_card != null:
+				var count: int    = self_card.get_counter(counter_type)
+				var gained: int   = count * credits_per
+				ctx.runner_credits += gained
+				ctx.log("Fermenter: %s gains %d cr (%d counters × %d cr)." % [
+					ctx.runner_name(), gained, count, credits_per
+				])
+			else:
+				push_error("AbilityInterpreter: gain_credits_per_counter — card not found")
+
+		"add_counters_to_installed_virus":
+			# Cookbook: when a virus program is installed, place 1 counter on it.
+			# The newly installed card's instance_id is in event_data.
+			var counter_type: String = effect.get("counter", "virus")
+			var amount: int          = int(effect.get("amount", 1))
+			# The newly-installed virus card is the event source
+			var new_card_iid: String = ctx.current_event_data.get("card_instance_id", "")
+			var new_card := ctx.get_installed_card_by_instance_id(new_card_iid)
+			if new_card != null:
+				new_card.add_counter(counter_type, amount)
+				ctx.log("Cookbook: placed %d %s counter(s) on %s." % [
+					amount, counter_type, new_card.display_name()
+				])
+
+		"gain_credits_first_trash_this_turn":
+			# Loup: the first time each turn you trash during a breach, gain 2cr.
+			if ctx.runner_trashed_during_breach_this_turn:
+				return   # already fired this turn
+			ctx.runner_trashed_during_breach_this_turn = true
+			var amount: int = int(params.get("amount", 2))
+			ctx.runner_credits += amount
+			ctx.log("Loup: %s gains %d cr (first trash this turn)." % [ctx.runner_name(), amount])
+
+		"may_swap_two_ice":
+			# Tāo: after a successful run, may swap two ice on any single server.
+			if ctx.runner_decision_maker == null:
+				return
+
+			# Build list of servers that have ≥2 ice
+			var eligible_servers: Array = []
+			for server in ctx.servers.values():
+				var s: Server = server as Server
+				if s.ice_count() >= 2:
+					eligible_servers.append(s)
+
+			if eligible_servers.is_empty():
+				return   # No servers with 2+ ice — nothing to swap
+
+			# Ask runner to choose a server and two ice positions (or decline)
+			var swap_choice: Variant = null
+			if ctx.runner_decision_maker.has_method("choose_ice_swap"):
+				swap_choice = await ctx.runner_decision_maker.choose_ice_swap(eligible_servers, ctx)
+
+			if swap_choice == null:
+				return   # Runner declined
+
+			# swap_choice is a Dictionary: {server: Server, pos_a: int, pos_b: int}
+			var s: Server = (swap_choice as Dictionary).get("server", null) as Server
+			var pos_a: int = (swap_choice as Dictionary).get("pos_a", 0)
+			var pos_b: int = (swap_choice as Dictionary).get("pos_b", 1)
+
+			if s == null or pos_a == pos_b:
+				return
+			if pos_a < 0 or pos_b < 0 or pos_a >= s.ice.size() or pos_b >= s.ice.size():
+				return
+
+			# Perform the swap
+			var ice_a: InstalledCard = s.ice[pos_a] as InstalledCard
+			var ice_b: InstalledCard = s.ice[pos_b] as InstalledCard
+			s.ice[pos_a] = ice_b
+			s.ice[pos_b] = ice_a
+			ctx.log("Tāo: swaps %s (position %d) and %s (position %d) on %s." % [
+				ice_a.display_name(), pos_a,
+				ice_b.display_name(), pos_b,
+				s.display_name()
+			])
+			# Anoetic Void: Corp may pay 2cr + trash 2 from HQ to end the breach.
+			var breach_server: String = ctx.current_event_data.get("server_id", "")
+			var av_iid: String        = ctx.current_event_data.get("card_instance_id", "")
+			var av_card := ctx.get_installed_card_by_instance_id(av_iid)
+			if av_card == null or av_card.server_id != breach_server or not av_card.is_rezzed:
+				return
+			var cost_cr: int    = int(params.get("cost_credits", 2))
+			var cost_trash: int = int(params.get("cost_trash_hq", 2))
+			if ctx.corp_credits < cost_cr or ctx.corp_hand.size() < cost_trash:
+				return
+			# Ask Corp decision maker
+			var use_it := false
+			if ctx.corp_decision_maker != null and ctx.corp_decision_maker.has_method("choose_use_anoetic_void"):
+				use_it = await ctx.corp_decision_maker.choose_use_anoetic_void(ctx)
+			else:
+				# AI default: use it when ahead on points or runner has few cards
+				use_it = ctx.corp_credits >= cost_cr + 2
+			if not use_it:
+				return
+			# Pay costs
+			ctx.corp_credits -= cost_cr
+			for i in range(cost_trash):
+				if ctx.corp_hand.is_empty():
+					break
+				var discarded: Dictionary = ctx.corp_hand.pop_back() as Dictionary
+				var record: CardRecord    = discarded.get("card_record", null) as CardRecord
+				if record:
+					ctx.corp_discard.append(record)
+					ctx.corp_discard_facedown[record.title] = true
+					ctx.log("Anoetic Void: Corp trashes %s from HQ." % record.title)
+			# Cancel the breach
+			ctx.run_modifiers["breach_cancelled"] = true
+			ctx.log("Anoetic Void: %s pays %d cr and trashes %d — breach ended." % [ctx.corp_name(), cost_cr, cost_trash])
+
 		# ── Pennyshaver / Red Team: counter effects gated on central server ───
 
 		"add_self_counters_if_central":
@@ -821,10 +1101,7 @@ func _execute_effect(effect: Dictionary, ctx: GameContext, chosen_target: Varian
 
 		"self_trash_if_used_this_run":
 			# Trash the owning card at run end. Mayfly always trashes when the run
-			# ends if it was used — we check if any break ability was invoked by
-			# looking for the card in the encounter's used_breakers, but since we
-			# don't track that yet we trash unconditionally (correct per card text:
-			# "when this run ends, trash this program" fires whenever used).
+			# ends if it was used — unconditional per card text.
 			var iid: String = ctx.current_event_data.get("card_instance_id", "")
 			var self_card   := ctx.get_installed_card_by_instance_id(iid)
 			if self_card == null and iid != "":
@@ -833,6 +1110,23 @@ func _execute_effect(effect: Dictionary, ctx: GameContext, chosen_target: Varian
 				ctx.runner_rig.erase(self_card)
 				ctx.unregister_all_card_effects(iid)
 				ctx.log("%s is trashed (end of run)." % self_card.display_name())
+
+		"self_trash":
+			# Unconditionally trash the owning card (Tranquilizer after derez, etc.)
+			var iid: String = ctx.current_event_data.get("card_instance_id", "")
+			var self_card   := ctx.get_installed_card_by_instance_id(iid)
+			if self_card == null and iid != "":
+				self_card = ctx.get_installed_card_by_id(iid)
+			if self_card != null:
+				# Remove from host ice if hosted
+				if self_card.hosted_on_id != "":
+					var host_ice := ctx.get_ice_by_instance_id(self_card.hosted_on_id)
+					if host_ice != null:
+						host_ice.hosted_cards.erase(self_card)
+				else:
+					ctx.runner_rig.erase(self_card)
+				ctx.unregister_all_card_effects(iid)
+				ctx.log("%s is trashed." % self_card.display_name())
 
 		_:
 			push_error("AbilityInterpreter: unknown effect type '%s'" % etype)
@@ -882,8 +1176,25 @@ func _deal_damage(damage_type: String, amount: int, ctx: GameContext) -> Array:
 
 
 func _trash_installed_card(card: InstalledCard, ctx: GameContext) -> void:
-	ctx.runner_rig.erase(card)
-	ctx.log("Trashed installed card: %s" % card.card_id)
+	# If this is ice with hosted programs, trash those first
+	if card.zone == "ice" and not card.hosted_cards.is_empty():
+		for hosted in card.hosted_cards.duplicate():
+			var h: InstalledCard = hosted as InstalledCard
+			ctx.runner_rig.erase(h)
+			ctx.unregister_all_card_effects(h.runtime_instance_id)
+			ctx.log("  %s trashed (host ice removed)." % h.display_name())
+		card.hosted_cards.clear()
+
+	# Remove from runner rig or from host ice
+	if card.hosted_on_id != "":
+		var host_ice := ctx.get_ice_by_instance_id(card.hosted_on_id)
+		if host_ice != null:
+			host_ice.hosted_cards.erase(card)
+	else:
+		ctx.runner_rig.erase(card)
+
+	ctx.unregister_all_card_effects(card.runtime_instance_id)
+	ctx.log("Trashed installed card: %s" % card.display_name())
 
 func _draw_cards(subject: String, amount: int, ctx: GameContext) -> void:
 	var deck: Array
@@ -954,19 +1265,26 @@ func _do_boost(action: Dictionary, encounter: EncounterState,
 		ctx.log("[Encounter] Cannot afford boost (need %d, have %d)." % [total_cost, ctx.runner_available_credits()])
 		return false
 
-	# Calculate strength gained — Unity gets +1 per installed icebreaker
+	# Calculate strength gained per use
+	# Unity: 1cr → strength equal to number of installed icebreakers (including itself)
 	var str_per_use: int = boost_dict.get("strength_gained", 1)
 	if boost_dict.get("strength_gained_modifier", "") == "installed_icebreaker_count":
-		var icebreaker_count: int = _count_installed_icebreakers(ctx, ability_registry)
-		str_per_use = icebreaker_count
+		str_per_use = ctx.count_installed_icebreakers()
 
 	ctx.runner_spend_credits(total_cost)
 	var total_boost: int = str_per_use * times
 	encounter.apply_boost(breaker, total_boost)
-	ctx.log("[Encounter] %s boosted %d times (+%d str, now %d). Cost: %d cr." % [
-		breaker.display_name(), times, total_boost,
-		encounter.get_breaker_strength(breaker), total_cost
-	])
+
+	if boost_dict.get("strength_gained_modifier", "") == "installed_icebreaker_count":
+		ctx.log("[Encounter] %s boosted +%d str (%d icebreakers). Cost: %d cr." % [
+			breaker.display_name(), total_boost, str_per_use,
+			total_cost
+		])
+	else:
+		ctx.log("[Encounter] %s boosted %s +%d str (now %d). Cost: %d cr." % [
+			breaker.display_name(), "×%d" % times if times > 1 else "",
+			total_boost, encounter.get_breaker_strength(breaker), total_cost
+		])
 	return true
 
 
@@ -993,8 +1311,17 @@ func _do_break_sub(action: Dictionary, encounter: EncounterState,
 
 	var break_dict: Dictionary = break_def as Dictionary
 
-	# Strength check
-	if not encounter.breaker_reaches(breaker):
+	# host_only: Botulus can only break subs on its host ice
+	if break_dict.get("host_only", false):
+		if breaker.hosted_on_id == "" or breaker.hosted_on_id != encounter.ice_card.runtime_instance_id:
+			ctx.log("[Encounter] %s can only break subroutines on %s." % [
+				breaker.display_name(),
+				ctx.get_ice_by_instance_id(breaker.hosted_on_id).display_name() if breaker.hosted_on_id != "" else "its host ice"
+			])
+			return false
+
+	# Strength check (Botulus has no base strength — host_only bypasses this)
+	if not break_dict.get("host_only", false) and not encounter.breaker_reaches(breaker):
 		ctx.log("[Encounter] %s (str %d) cannot reach %s (str %d)." % [
 			breaker.display_name(),
 			encounter.get_breaker_strength(breaker),
@@ -1004,14 +1331,27 @@ func _do_break_sub(action: Dictionary, encounter: EncounterState,
 		return false
 
 	var cost: int = break_dict.get("cost_per_sub", 1)
-	if ctx.runner_available_credits() < cost:
+	var virus_cost: int = break_dict.get("cost_virus_counter", 0)
+
+	if virus_cost > 0:
+		# Botulus spends virus counters
+		var available_virus: int = breaker.get_counter("virus")
+		if available_virus < virus_cost:
+			ctx.log("[Encounter] %s has no virus counters to spend." % breaker.display_name())
+			return false
+		breaker.remove_counter("virus", virus_cost)
+	elif ctx.runner_available_credits() < cost:
 		ctx.log("[Encounter] Cannot afford to break (need %d, have %d)." % [cost, ctx.runner_available_credits()])
 		return false
-
-	ctx.runner_spend_credits(cost)
+	else:
+		ctx.runner_spend_credits(cost)
 	encounter.break_subroutine(sub_index)
 	var sub_label: String = (encounter.subroutines[sub_index] as Dictionary).get("label", "subroutine %d" % sub_index)
-	ctx.log("[Encounter] %s breaks \'%s\' for %d cr." % [breaker.display_name(), sub_label, cost])
+	if virus_cost > 0:
+		ctx.log("[Encounter] %s breaks \'%s\' (1 virus, %d remaining)." % [
+			breaker.display_name(), sub_label, breaker.get_counter("virus")])
+	else:
+		ctx.log("[Encounter] %s breaks \'%s\' for %d cr." % [breaker.display_name(), sub_label, cost])
 	return true
 
 
@@ -1112,14 +1452,6 @@ func _find_breaker(card_id: String, encounter: EncounterState) -> InstalledCard:
 	return null
 
 
-func _count_installed_icebreakers(ctx: GameContext, ability_registry: AbilityRegistry) -> int:
-	var count := 0
-	for card in ctx.runner_rig:
-		var c: InstalledCard = card as InstalledCard
-		if ability_registry.is_icebreaker(c.card_id):
-			count += 1
-	return count
-
 # ── Modal ability execution ───────────────────────────────────────────────────
 # Handles cards like Predictive Planogram where the player chooses between
 # multiple effects. Supports a bonus_condition that auto-executes remaining
@@ -1141,13 +1473,17 @@ func execute_modal_trigger(trigger_def: Dictionary, ctx: GameContext) -> void:
 			ctx.log("Bonus condition met — all modes will execute.")
 			max_choices = modes.size()
 
-	# Ask decision maker to choose
+	# Ask decision maker to choose.
+	# "chooser" overrides the active player — used by Wildcat Strike where Corp
+	# chooses even though the Runner is the active player.
+	var chooser: String = trigger_def.get("chooser", ctx.active_player)
 	var chosen_indices: Array = []
-	var decision_maker: Object = ctx.corp_decision_maker if ctx.active_player == "corp" else ctx.runner_decision_maker
+	var decision_maker: Object = ctx.corp_decision_maker if chooser == "corp" else ctx.runner_decision_maker
+	if chooser == "corp":
+		ctx.log("Corp chooses the effect of this card...")
 	if decision_maker != null and decision_maker.has_method("choose_modes"):
 		chosen_indices = await decision_maker.choose_modes(modes, max_choices, ctx)
 	else:
-		# No decision maker or no method — default to first mode
 		chosen_indices = [0]
 
 	# If bonus is active, also execute any unchosen modes

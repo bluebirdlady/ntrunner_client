@@ -19,8 +19,8 @@ var corp_clicks:    int = 0
 var runner_clicks:  int = 0
 
 # ── Decision-makers────────────────────────────────────────────────────────────
-var corp_decision_maker: Object = null
-var runner_decision_maker: Object = null
+var corp_decision_maker:  Object = null
+var runner_decision_maker:  Object = null
 
 # ── Hands ─────────────────────────────────────────────────────────────────────
 # Each entry: {"card_id": String, "card_record": CardRecord}
@@ -70,6 +70,12 @@ var runner_centrals_run_this_turn: Array = []
 var runner_click_draws_this_turn: int = 0
 # Tracks which cards have already fired their "first HQ breach" bonus this turn (Docklands Pass)
 var runner_hq_breached_this_turn: bool = false
+# Tracks whether runner has already trashed during a breach this turn (Loup trigger guard)
+var runner_trashed_during_breach_this_turn: bool = false
+# Tracks whether DZMZ Optimizer discount has been used this turn
+var runner_program_install_discounted_this_turn: bool = false
+# Tracks whether Carnivore has been used this turn (once per turn)
+var runner_carnivore_used_this_turn: bool = false
 # Run modifiers: set by run-initiating events, cleared when the run ends.
 # Supported keys:
 #   "extra_rez_cost"    : int — Corp pays extra to rez ice (Tread Lightly)
@@ -136,13 +142,20 @@ func runner_mu_bonus() -> int:
 func runner_total_mu() -> int:
 	return runner_base_mu() + runner_mu_bonus()
 
-# MU currently consumed by installed programs
+# MU currently consumed by installed programs (including those hosted on ice)
 func runner_mu_used() -> int:
 	var used := 0
 	for card in runner_rig:
 		var c: InstalledCard = card as InstalledCard
 		if c != null and c.card_record != null and c.card_record.memory_cost > 0:
 			used += c.card_record.memory_cost
+	# Also count programs hosted on ice
+	for server in servers.values():
+		for ice in (server as Server).ice:
+			for hosted in (ice as InstalledCard).hosted_cards:
+				var h: InstalledCard = hosted as InstalledCard
+				if h != null and h.card_record != null and h.card_record.memory_cost > 0:
+					used += h.card_record.memory_cost
 	return used
 
 # MU still available for programs
@@ -177,6 +190,26 @@ func get_server(server_id: String) -> Server:
 func remove_meta_if_exists(key: String) -> void:
 	if has_meta(key):
 		remove_meta(key)
+
+# Returns all programs available during an encounter with a specific ice:
+# the normal rig PLUS any programs hosted on that ice (Botulus, Tranquilizer).
+func all_programs_for_encounter(ice_card: InstalledCard) -> Array:
+	var result: Array = runner_rig.duplicate()
+	if ice_card != null:
+		for hosted in ice_card.hosted_cards:
+			if not result.has(hosted):
+				result.append(hosted)
+	return result
+
+# Find a piece of ice anywhere in the Corp's servers by instance_id.
+func get_ice_by_instance_id(instance_id: String) -> InstalledCard:
+	for server in servers.values():
+		var s: Server = server as Server
+		for ice in s.ice:
+			var c: InstalledCard = ice as InstalledCard
+			if c.runtime_instance_id == instance_id:
+				return c
+	return null
 
 func create_remote_server() -> Server:
 	var idx := 0
@@ -256,18 +289,22 @@ func register_listener(event_type: String, instance_id: String, ability_def: Dic
 		"ability_def": ability_def
 	})
 
-func register_modifier(mod_type: String, instance_id: String, value_modifier: int, conditions: Dictionary = {}) -> void:
+func register_modifier(mod_type: String, instance_id: String, value_modifier: int, conditions: Dictionary = {}, extra: Dictionary = {}) -> void:
 	if not _state_modifiers.has(mod_type):
 		_state_modifiers[mod_type] = []
 	# Guard against duplicate registration
 	for existing in _state_modifiers[mod_type]:
 		if (existing as Dictionary).get("card_instance_id", "") == instance_id:
 			return
-	_state_modifiers[mod_type].append({
+	var entry := {
 		"card_instance_id": instance_id,
 		"value": value_modifier,
 		"conditions": conditions
-	})
+	}
+	# Merge any extra fields (e.g. card_id, method for dynamic_base_strength)
+	for key in extra:
+		entry[key] = extra[key]
+	_state_modifiers[mod_type].append(entry)
 
 func unregister_all_card_effects(instance_id: String) -> void:
 	for event_type in _event_listeners:
@@ -372,8 +409,10 @@ func get_card_owner_by_instance_id(instance_id: String) -> String:
 		if c.runtime_instance_id == instance_id:
 			return "runner"
 	# 3. Identity fallbacks
-	if instance_id.begins_with("runner_identity"):
+	if instance_id == "identity_runner" or instance_id.begins_with("runner_identity"):
 		return "runner"
+	if instance_id == "identity_corp":
+		return "corp"
 	return "corp"
 
 
@@ -401,6 +440,35 @@ func query_breaker_strength_bonus() -> int:
 	for mod in mods:
 		total += mod.get("value", 0) as int
 	return total
+
+
+func query_dynamic_breaker_base(breaker: InstalledCard) -> int:
+	# Returns a dynamic base strength for a specific breaker, or -1 if none applies.
+	if breaker.card_record == null:
+		return -1
+	var mods: Array = _state_modifiers.get("dynamic_base_strength", [])
+	for mod in mods:
+		var d := mod as Dictionary
+		if d.get("card_id", "") != breaker.card_id:
+			continue
+		var method: String = d.get("method", "")
+		match method:
+			"installed_icebreaker_count":
+				# Both Unity and Echelon count all installed icebreakers including themselves
+				return count_installed_icebreakers()
+	return -1
+
+
+func count_installed_icebreakers() -> int:
+	var count := 0
+	for card in runner_rig:
+		var c: InstalledCard = card as InstalledCard
+		if c == null or c.card_record == null:
+			continue
+		if c.card_record.has_subtype("icebreaker") or \
+		   c.card_record.subtypes.any(func(s): return s in ["fracter", "decoder", "killer", "ai"]):
+			count += 1
+	return count
 
 
 func corp_max_hand_size() -> int:

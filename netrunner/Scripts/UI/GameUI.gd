@@ -60,6 +60,14 @@ func setup(ctx: GameContext, turn_manager: TurnManager, run_machine: RunStateMac
 	if state_panel:
 		state_panel.custom_minimum_size = Vector2(700, 0)
 		state_panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+
+	# Cyberpunk log styling
+	log_text.add_theme_color_override("font_color", Color(0.55, 0.85, 0.65))
+	log_text.add_theme_color_override("background_color", Color(0.04, 0.06, 0.08))
+	log_text.add_theme_font_size_override("font_size", 12)
+
+	# Seed log with a cyberpunk header
+	log_text.text = "// NETRUNNER TACTICAL INTERFACE //\n// RUNNER FEED ACTIVE //\n\n"
 	
 	# Wire up engine signals to automatically refresh components
 	if not turn_manager.turn_started.is_connected(_on_turn_started):
@@ -71,23 +79,28 @@ func setup(ctx: GameContext, turn_manager: TurnManager, run_machine: RunStateMac
 	if not turn_manager.game_over.is_connected(_on_game_over):
 		turn_manager.game_over.connect(_on_game_over)
 	
-	# Connect RunStateMachine updates to the UI logger safely using anonymized callables
-	run_machine.phase_changed.connect(func(phase): _append_log("[RUN] Phase changed to: %d" % phase))
-	run_machine.ice_approached.connect(func(ice): _append_log("[RUN] Approaching ICE: %s" % ice.card_record.title))
-	run_machine.ice_encountered.connect(func(ice): _append_log("[RUN] Encountering ICE: %s" % ice.card_record.title))
-	run_machine.ice_rezzed.connect(func(ice): _append_log("[RUN] ICE Rezzed: %s" % ice.card_record.title))
-	run_machine.run_succeeded.connect(func(srv):
-		_append_log("✅ [RUN] Success! Breached %s" % srv)
+	# Connect RunStateMachine updates to the runner-visible log
+	run_machine.ice_approached.connect(func(ice: InstalledCard):
+		if ice.is_rezzed:
+			_log_run("Approaching %s." % ice.card_record.title)
+		else:
+			_log_run("Approaching unrezzed ICE.")
+	)
+	run_machine.ice_encountered.connect(func(ice: InstalledCard):
+		if ice.is_rezzed:
+			_log_run("Encountering %s." % ice.card_record.title)
+	)
+	run_machine.ice_rezzed.connect(func(ice: InstalledCard):
+		_log_run("Corp rezzes %s." % ice.card_record.title)
+	)
+	run_machine.run_succeeded.connect(func(srv: String):
+		_log_run("Run successful on %s." % srv.to_upper())
 		_update_all_displays()
 	)
-	run_machine.run_ended_unsuccessfully.connect(func(reason):
-		_append_log("❌ [RUN] Run ended (%s)" % reason)
+	run_machine.run_ended_unsuccessfully.connect(func(reason: String):
+		_log_run("Run ended — %s." % reason)
 		_update_all_displays()
 	)
-	if run_machine.has_signal("encounter_started"):
-		run_machine.encounter_started.connect(func(enc):
-			_append_log("⚔ [ENCOUNTER] %s" % enc.describe())
-		)
 
 	# Initialize visual configurations
 	resource_label.meta_clicked.connect(_on_score_area_clicked)
@@ -109,9 +122,10 @@ func _update_all_displays() -> void:
 	var runner_pts := _ctx.runner_agenda_points()
 	var corp_pts_link   := "[url=score_corp][color=#aaffaa]%d pts[/color][/url]" % corp_pts
 	var runner_pts_link := "[url=score_runner][color=#aaffaa]%d pts[/color][/url]" % runner_pts
+	var mu_link := "[url=rig][color=#88ccff]%d/%d[/color][/url]" % [_ctx.runner_mu_used(), _ctx.runner_total_mu()]
 	resource_label.text = (
 		"[b]%s[/b]  %s%d  %s%d  %s%s\n" % [corp_label, BBQ_CR, _ctx.corp_credits, BBQ_CL, _ctx.corp_clicks, BBQ_AG, corp_pts_link] +
-		"[b]%s[/b]  %s%d  %s%d  %s%s  %s%d  %s%d/%d" % [runner_label, BBQ_CR, _ctx.runner_credits, BBQ_CL, _ctx.runner_clicks, BBQ_AG, runner_pts_link, BBQ_TG, _ctx.runner_tags, BBQ_MU, _ctx.runner_mu_used(), _ctx.runner_total_mu()]
+		"[b]%s[/b]  %s%d  %s%d  %s%s  %s%d  %s%s" % [runner_label, BBQ_CR, _ctx.runner_credits, BBQ_CL, _ctx.runner_clicks, BBQ_AG, runner_pts_link, BBQ_TG, _ctx.runner_tags, BBQ_MU, mu_link]
 	)
 	
 	#corp_hand_label.text = "Corp HQ Hand (%d cards):\n%s" % [_ctx.corp_hand.size(), _format_hand(_ctx.corp_hand)]
@@ -311,17 +325,24 @@ func _populate_action_menu() -> void:
 			if not card_def.has("click_action"):
 				continue
 			var click_def: Dictionary = card_def["click_action"] as Dictionary
-			# Hide if card has a credits counter and it's empty
-			var hosted: int = c.get_counter("credits")
-			var needs_credits: bool = click_def.get("effects", []).any(
-				func(e): return (e as Dictionary).get("type", "") in [
-					"take_hosted_credits_amount", "take_all_hosted_credits"
-				]
+			# Determine what counter type this action drains (credits or virus etc.)
+			var effects_list: Array = click_def.get("effects", []) as Array
+			var drains_counter: bool = effects_list.any(func(e):
+				var t: String = (e as Dictionary).get("type", "")
+				return t in ["take_hosted_credits_amount", "take_all_hosted_credits",
+							 "gain_credits_per_counter"]
 			)
-			if needs_credits and hosted <= 0:
+			var counter_type: String = "credits"
+			for eff in effects_list:
+				var e: Dictionary = eff as Dictionary
+				if e.get("type", "") == "gain_credits_per_counter":
+					counter_type = e.get("counter", "virus")
+					break
+			var hosted: int = c.get_counter(counter_type)
+			if drains_counter and hosted <= 0:
 				continue
 			var base_label: String = click_def.get("label", "Use %s" % c.display_name())
-			var label: String = "%s  [%d cr]" % [base_label, hosted] if hosted > 0 else base_label
+			var label: String = "%s  [%d %s]" % [base_label, hosted, counter_type] if hosted > 0 else base_label
 			if not has_card_actions:
 				_add_section_label("── INSTALLED ──")
 				has_card_actions = true
@@ -340,7 +361,7 @@ func _add_section_label(text: String) -> void:
 	var lbl := Label.new()
 	lbl.text = text
 	lbl.add_theme_font_size_override("font_size", 10)
-	lbl.add_theme_color_override("font_color", Color(0.6, 0.6, 0.6))
+	lbl.add_theme_color_override("font_color", Color(0.3, 0.6, 0.8))
 	action_menu.add_child(lbl)
 
 
@@ -348,9 +369,19 @@ func _add_action_btn(label_text: String, action: GameAction) -> void:
 	var btn := Button.new()
 	btn.text = label_text
 	btn.alignment = HorizontalAlignment.HORIZONTAL_ALIGNMENT_LEFT
+	btn.add_theme_color_override("font_color", Color(0.7, 0.95, 0.75))
+	btn.add_theme_color_override("font_hover_color", Color(0.9, 1.0, 0.9))
 	btn.pressed.connect(func(): action_requested.emit(action))
 	action_menu.add_child(btn)
 
+
+func _log_game(message: String) -> void:
+	log_text.text += message + "\n"
+	log_text.scroll_vertical = log_text.get_line_count()
+
+func _log_run(message: String) -> void:
+	log_text.text += "  » " + message + "\n"
+	log_text.scroll_vertical = log_text.get_line_count()
 
 func _append_log(message: String) -> void:
 	log_text.text += message + "\n"
@@ -360,47 +391,239 @@ func _append_log(message: String) -> void:
 # ── System Signal Hook Interceptions ──────────────────────────────────────────
 
 func _on_turn_started(player: String, turn_number: int) -> void:
-	_append_log("\n⚡ --- TURN %d: %s's Turn ---" % [turn_number, _ctx.player_name(player)])
-	_update_all_displays()
-	# Show a turn banner for Corp turns so it's visually obvious
 	if player == "corp":
-		_show_toast("⚡  %s — Turn %d" % [_ctx.corp_name(), turn_number], Color(0.25, 0.35, 0.55), 2.0)
+		_log_game("\n// CORP TURN %d //" % turn_number)
+		_show_toast("// %s — TURN %d //" % [_ctx.corp_name().to_upper(), turn_number],
+			Color(0.15, 0.22, 0.35), 2.2)
+	else:
+		_log_game("\n// YOUR TURN %d //" % turn_number)
+	_update_all_displays()
+
 
 func _on_action_executed(player: String, action: GameAction) -> void:
-	_append_log("[%s] %s" % [_ctx.player_name(player), action.describe()])
 	_update_all_displays()
-	# Toast for notable Corp actions only
 	if player == "corp":
-		var toast_text := _corp_action_toast(action)
-		if toast_text != "":
-			_show_toast(toast_text, Color(0.2, 0.28, 0.42), 1.8)
+		_handle_corp_action_display(action)
+	else:
+		_handle_runner_action_display(action)
 
 
-func _corp_action_toast(action: GameAction) -> String:
+func _handle_corp_action_display(action: GameAction) -> void:
 	match action.type:
 		"install":
 			var r: CardRecord = action.params.get("card_record", null)
-			if r == null:
-				return ""
-			var zone: String = action.params.get("zone", "root")
+			var zone: String  = action.params.get("zone", "root")
 			if zone == "ice":
-				return "🔒  Installs ICE"
-			elif r.is_agenda():
-				return "📋  Installs agenda in remote"
+				_log_game("  Corp installs ICE.")
+				_show_corp_event("installs ICE", null, Color(0.2, 0.3, 0.5))
+			elif r != null and r.is_agenda():
+				_log_game("  Corp installs a card in a new remote.")
+				_show_corp_event("installs in remote", null, Color(0.2, 0.3, 0.5))
 			else:
-				return "📦  Installs %s" % r.card_type
+				_log_game("  Corp installs a card.")
+				_show_corp_event("installs a card", null, Color(0.2, 0.3, 0.5))
 		"advance":
-			return "⬆  Advances installed card"
+			_log_game("  Corp advances an installed card.")
+			_show_corp_event("advances ▲", null, Color(0.25, 0.3, 0.45))
 		"play_operation":
 			var r: CardRecord = action.params.get("card_record", null)
-			return "📄  Plays %s" % (r.title if r else "operation")
+			if r != null:
+				_log_game("  Corp plays %s." % r.title)
+				_show_corp_event_with_card("plays operation", r, Color(0.22, 0.28, 0.48))
 		"rez_card":
-			return "⚡  Rezzes a card"
-		_:
-			return ""
+			# Find the card that was just rezzed to show it
+			var card_id: String = action.params.get("card_id", "")
+			var iid: String     = action.params.get("card_instance_id", "")
+			var installed: InstalledCard = null
+			if iid != "":
+				installed = _ctx.get_installed_card_by_instance_id(iid)
+			if installed == null and card_id != "":
+				installed = _ctx.get_installed_card_by_id(card_id)
+			if installed != null and installed.card_record != null:
+				_log_game("  Corp rezzes %s." % installed.card_record.title)
+				_show_corp_event_with_card("REZZES", installed.card_record, Color(0.18, 0.28, 0.45))
+			else:
+				_log_game("  Corp rezzes a card.")
+		"gain_credits":
+			_log_game("  Corp takes a credit.")
+		"draw_card":
+			_log_game("  Corp draws a card.")
+		"use_installed_card":
+			_log_game("  Corp uses an installed card.")
+		"end_turn":
+			_log_game("  Corp ends turn.")
+		"score_agenda":
+			var r: CardRecord = action.params.get("card_record", null)
+			if r != null:
+				_log_game("  !! Corp scores %s!" % r.title)
+				_show_corp_event_with_card("SCORES", r, Color(0.5, 0.15, 0.15))
 
 
-# ── Toast notification ────────────────────────────────────────────────────────
+func _handle_runner_action_display(action: GameAction) -> void:
+	match action.type:
+		"gain_credits":
+			_log_game("  You take a credit.")
+		"draw_card":
+			_log_game("  You draw a card.")
+		"install":
+			var r: CardRecord = action.params.get("card_record", null)
+			if r != null:
+				_log_game("  You install %s." % r.title)
+		"play_operation":
+			var r: CardRecord = action.params.get("card_record", null)
+			if r != null:
+				_log_game("  You play %s." % r.title)
+		"run":
+			var server_id: String = action.params.get("server_id", "?")
+			_log_game("  You initiate a run on %s." % server_id.to_upper())
+		"use_installed_card":
+			_log_game("  You use an installed card.")
+		"end_turn":
+			_log_game("  You end your turn.")
+
+
+func _show_corp_event(label: String, _card: CardRecord, color: Color) -> void:
+	_show_toast("CORP: %s" % label.to_upper(), color, 1.6)
+
+
+func _show_corp_event_with_card(label: String, card: CardRecord, color: Color) -> void:
+	if card == null:
+		_show_corp_event(label, null, color)
+		return
+	# Show a compact card popup alongside the toast
+	_show_corp_card_reveal(label, card, color)
+
+
+func _show_corp_card_reveal(label: String, card: CardRecord, color: Color) -> void:
+	var state_panel: Control = resource_label.get_parent().get_parent() as Control
+	if state_panel == null:
+		return
+
+	var panel := PanelContainer.new()
+	panel.modulate.a = 0.0
+	panel.set_anchors_preset(Control.PRESET_TOP_WIDE)
+	panel.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	panel.custom_minimum_size = Vector2(480, 0)
+	state_panel.add_child(panel)
+
+	var style := StyleBoxFlat.new()
+	style.bg_color = Color(color.r, color.g, color.b, 0.93)
+	style.border_color = Color(color.r + 0.2, color.g + 0.2, color.b + 0.3, 1.0)
+	style.border_width_top = 1
+	style.border_width_bottom = 1
+	style.corner_radius_top_left = 4
+	style.corner_radius_top_right = 4
+	style.corner_radius_bottom_left = 4
+	style.corner_radius_bottom_right = 4
+	style.content_margin_left   = 10
+	style.content_margin_right  = 10
+	style.content_margin_top    = 8
+	style.content_margin_bottom = 8
+	panel.add_theme_stylebox_override("panel", style)
+
+	var hbox := HBoxContainer.new()
+	hbox.add_theme_constant_override("separation", 12)
+	panel.add_child(hbox)
+
+	var card_view := CardView.new()
+	card_view.custom_minimum_size = Vector2(65, 91)
+	hbox.add_child(card_view)
+	card_view.setup(card, true)
+
+	var vbox := VBoxContainer.new()
+	vbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	hbox.add_child(vbox)
+
+	var lbl_action := Label.new()
+	lbl_action.text = "CORP %s" % label.to_upper()
+	lbl_action.add_theme_font_size_override("font_size", 10)
+	lbl_action.add_theme_color_override("font_color", Color(0.6, 0.7, 0.9))
+	vbox.add_child(lbl_action)
+
+	var lbl_title := Label.new()
+	lbl_title.text = card.title
+	lbl_title.add_theme_font_size_override("font_size", 15)
+	lbl_title.add_theme_color_override("font_color", Color(0.95, 0.95, 1.0))
+	lbl_title.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	vbox.add_child(lbl_title)
+
+	if card.agenda_points > 0:
+		var lbl_pts := Label.new()
+		lbl_pts.text = "%d agenda point%s" % [card.agenda_points, "s" if card.agenda_points != 1 else ""]
+		lbl_pts.add_theme_font_size_override("font_size", 11)
+		lbl_pts.add_theme_color_override("font_color", Color(1.0, 0.8, 0.4))
+		vbox.add_child(lbl_pts)
+
+	var tween := create_tween()
+	tween.tween_property(panel, "modulate:a", 1.0, 0.18)
+	await tween.finished
+	await get_tree().create_timer(3.0).timeout
+	if not is_instance_valid(panel):
+		return
+	tween = create_tween()
+	tween.tween_property(panel, "modulate:a", 0.0, 0.3)
+	await tween.finished
+	if is_instance_valid(panel):
+		panel.queue_free()
+
+
+# ── Game Over ─────────────────────────────────────────────────────────────────
+
+func _on_game_over(winner: String, reason: String) -> void:
+	_log_game("\n// TRANSMISSION ENDED //")
+	var winner_name: String = _ctx.player_name(winner)
+	_log_game("OUTCOME: %s WINS" % winner_name.to_upper())
+	_log_game("REASON:  %s" % reason)
+
+	for child in action_menu.get_children():
+		child.queue_free()
+
+	# Full-screen game over overlay
+	var overlay := ColorRect.new()
+	overlay.color = Color(0, 0, 0, 0.0)
+	overlay.set_anchors_preset(Control.PRESET_FULL_RECT)
+	add_child(overlay)
+
+	var tween := create_tween()
+	tween.tween_property(overlay, "color:a", 0.75, 0.8)
+	await tween.finished
+
+	var vbox := VBoxContainer.new()
+	vbox.set_anchors_preset(Control.PRESET_CENTER)
+	vbox.alignment = BoxContainer.ALIGNMENT_CENTER
+	vbox.add_theme_constant_override("separation", 16)
+	overlay.add_child(vbox)
+
+	var is_runner_win := winner == "runner"
+	var headline := Label.new()
+	headline.text = "[ RUNNER WINS ]" if is_runner_win else "[ CORP WINS ]"
+	headline.add_theme_font_size_override("font_size", 42)
+	headline.add_theme_color_override("font_color",
+		Color(0.3, 1.0, 0.5) if is_runner_win else Color(0.9, 0.3, 0.3))
+	headline.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	vbox.add_child(headline)
+
+	var sub := Label.new()
+	sub.text = winner_name
+	sub.add_theme_font_size_override("font_size", 20)
+	sub.add_theme_color_override("font_color", Color(0.7, 0.7, 0.8))
+	sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	vbox.add_child(sub)
+
+	var reason_lbl := Label.new()
+	reason_lbl.text = reason
+	reason_lbl.add_theme_font_size_override("font_size", 13)
+	reason_lbl.add_theme_color_override("font_color", Color(0.5, 0.5, 0.6))
+	reason_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	reason_lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	reason_lbl.custom_minimum_size = Vector2(400, 0)
+	vbox.add_child(reason_lbl)
+
+	# Pulse the headline
+	var pulse := create_tween()
+	pulse.set_loops()
+	pulse.tween_property(headline, "modulate:a", 0.6, 1.2)
+	pulse.tween_property(headline, "modulate:a", 1.0, 1.2)
 
 var _toast_queue: Array = []
 var _toast_showing: bool = false
@@ -474,15 +697,9 @@ func _display_toast(message: String, bg_color: Color, duration: float) -> void:
 		panel.queue_free()
 
 func _on_action_rejected(player: String, action: GameAction, reason: String) -> void:
-	_append_log("❌ REJECTED: %s -> %s" % [action.describe(), reason])
-
-func _on_game_over(winner: String, reason: String) -> void:
-	_append_log("\n🏆 GAME OVER! %s Wins. Reason: %s" % [_ctx.player_name(winner).to_upper(), reason])
-	for child in action_menu.get_children():
-		child.queue_free()
-	var game_over_lbl := Label.new()
-	game_over_lbl.text = "MATCH CONCLUDED: %s Victory" % winner.to_upper()
-	action_menu.add_child(game_over_lbl)
+	# Action rejected — only log runner rejections (Corp rejections are internal)
+	if player == "runner":
+		_log_game("  ✗ Action rejected: %s" % reason)
 
 
 # ── Asynchronous Choice Prompt Engine ─────────────────────────────────────────
@@ -492,7 +709,7 @@ func show_rez_prompt(ice_card: InstalledCard) -> bool:
 	var title_text := ice_card.card_record.title if ice_card.card_record else "ICE"
 	var cost_val := ice_card.card_record.cost if ice_card.card_record else 0
 	
-	_append_log("PROMPT: %s, choose whether to rez %s..." % [_ctx.corp_name(), title_text])
+	# Corp rez prompt — not logged to runner-visible log
 	
 	var prompt_box := HBoxContainer.new()
 	var prompt_lbl := Label.new()
@@ -873,6 +1090,124 @@ func _on_score_area_clicked(meta: Variant) -> void:
 		_show_score_popup("Corp Score Area — %s" % _ctx.corp_name(), _ctx.corp_score_area)
 	elif which == "score_runner":
 		_show_score_popup("Runner Score Area — %s" % _ctx.runner_name(), _ctx.runner_score_area)
+	elif which == "rig":
+		_show_rig_popup()
+
+
+func _show_rig_popup() -> void:
+	if _score_popup != null and is_instance_valid(_score_popup):
+		_score_popup.queue_free()
+		_score_popup = null
+		return
+
+	var backdrop := ColorRect.new()
+	backdrop.color = Color(0, 0, 0, 0.45)
+	backdrop.set_anchors_preset(Control.PRESET_FULL_RECT)
+	backdrop.mouse_filter = Control.MOUSE_FILTER_STOP
+	add_child(backdrop)
+	_score_popup = backdrop
+
+	var panel := PanelContainer.new()
+	panel.set_anchors_preset(Control.PRESET_CENTER)
+	panel.custom_minimum_size = Vector2(700, 200)
+	backdrop.add_child(panel)
+
+	var vbox := VBoxContainer.new()
+	vbox.add_theme_constant_override("separation", 12)
+	panel.add_child(vbox)
+
+	# Title bar
+	var title_row := HBoxContainer.new()
+	vbox.add_child(title_row)
+
+	var title_lbl := Label.new()
+	title_lbl.text = "RIG  //  %s/%s MU used" % [_ctx.runner_mu_used(), _ctx.runner_total_mu()]
+	title_lbl.add_theme_font_size_override("font_size", 16)
+	title_lbl.add_theme_color_override("font_color", Color(0.6, 0.85, 1.0))
+	title_lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	title_row.add_child(title_lbl)
+
+	var close_btn := Button.new()
+	close_btn.text = "✕"
+	close_btn.pressed.connect(func():
+		if is_instance_valid(_score_popup):
+			_score_popup.queue_free()
+			_score_popup = null
+	)
+	title_row.add_child(close_btn)
+
+	if _ctx.runner_rig.is_empty():
+		var empty := Label.new()
+		empty.text = "Rig is empty."
+		empty.add_theme_color_override("font_color", Color(0.5, 0.5, 0.5))
+		vbox.add_child(empty)
+	else:
+		var scroll := ScrollContainer.new()
+		scroll.custom_minimum_size = Vector2(0, 240)
+		scroll.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+		vbox.add_child(scroll)
+
+		var card_row := HBoxContainer.new()
+		card_row.add_theme_constant_override("separation", 10)
+		scroll.add_child(card_row)
+
+		for installed in _ctx.runner_rig:
+			var c: InstalledCard = installed as InstalledCard
+			if c == null or c.card_record == null:
+				continue
+			var col := VBoxContainer.new()
+			col.add_theme_constant_override("separation", 4)
+			card_row.add_child(col)
+
+			var card_view := CardView.new()
+			col.add_child(card_view)
+			card_view.setup(c.card_record, true)
+
+			# MU cost
+			if c.card_record.memory_cost > 0:
+				var mu_lbl := Label.new()
+				mu_lbl.text = "%d MU" % c.card_record.memory_cost
+				mu_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+				mu_lbl.add_theme_font_size_override("font_size", 11)
+				mu_lbl.add_theme_color_override("font_color", Color(0.5, 0.75, 1.0))
+				col.add_child(mu_lbl)
+
+			# Hosted credits if any
+			var credits: int = c.get_counter("credits")
+			if credits > 0:
+				var cr_lbl := Label.new()
+				cr_lbl.text = "%d cr" % credits
+				cr_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+				cr_lbl.add_theme_font_size_override("font_size", 11)
+				cr_lbl.add_theme_color_override("font_color", Color(0.8, 1.0, 0.6))
+				col.add_child(cr_lbl)
+
+
+			# Strength if icebreaker
+			if c.card_record.card_type == "program":
+				# Use the actual strength property from CardRecord
+				var base_str: int = c.card_record.strength
+				var str_bonus: int = _ctx.query_breaker_strength_bonus()
+				
+				# Just show card name subtype for now
+				var sub_lbl := Label.new()
+				# CardRecord.subtypes is an Array of strings; join them or take first
+				var subtype_text: String = ""
+				if not c.card_record.subtypes.is_empty():
+					subtype_text = c.card_record.subtypes[0]  # or join(", ")
+				sub_lbl.text = subtype_text
+				if sub_lbl.text != "":
+					sub_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+					sub_lbl.add_theme_font_size_override("font_size", 10)
+					sub_lbl.add_theme_color_override("font_color", Color(0.55, 0.55, 0.6))
+					col.add_child(sub_lbl)
+
+	backdrop.gui_input.connect(func(event: InputEvent):
+		if event is InputEventMouseButton and event.pressed:
+			if is_instance_valid(_score_popup):
+				_score_popup.queue_free()
+				_score_popup = null
+	)
 
 
 func _show_score_popup(title: String, cards: Array) -> void:
@@ -961,3 +1296,274 @@ func _show_score_popup(title: String, cards: Array) -> void:
 				_score_popup.queue_free()
 				_score_popup = null
 	)
+
+
+# ── Choose-from-hand prompt ───────────────────────────────────────────────────
+
+func show_choose_from_hand_prompt(hand: Array, prompt_text: String) -> Variant:
+	var resolved: Variant = null
+	var done := false
+
+	var backdrop := ColorRect.new()
+	backdrop.color = Color(0, 0, 0, 0.5)
+	backdrop.set_anchors_preset(Control.PRESET_FULL_RECT)
+	backdrop.mouse_filter = Control.MOUSE_FILTER_STOP
+	add_child(backdrop)
+
+	var panel := PanelContainer.new()
+	panel.set_anchors_preset(Control.PRESET_CENTER)
+	panel.custom_minimum_size = Vector2(600, 0)
+	backdrop.add_child(panel)
+
+	var vbox := VBoxContainer.new()
+	vbox.add_theme_constant_override("separation", 10)
+	panel.add_child(vbox)
+
+	var lbl := Label.new()
+	lbl.text = prompt_text
+	lbl.add_theme_font_size_override("font_size", 14)
+	lbl.add_theme_color_override("font_color", Color(0.7, 0.95, 0.75))
+	lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	vbox.add_child(lbl)
+
+	var scroll := ScrollContainer.new()
+	scroll.custom_minimum_size = Vector2(0, 220)
+	scroll.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	vbox.add_child(scroll)
+
+	var card_row := HBoxContainer.new()
+	card_row.add_theme_constant_override("separation", 8)
+	scroll.add_child(card_row)
+
+	for entry in hand:
+		var e: Dictionary = entry as Dictionary
+		var record: CardRecord = e.get("card_record", null) as CardRecord
+		if record == null:
+			continue
+		var col := VBoxContainer.new()
+		col.add_theme_constant_override("separation", 4)
+		card_row.add_child(col)
+
+		var cv := CardView.new()
+		col.add_child(cv)
+		cv.setup(record, true)
+
+		var btn := Button.new()
+		btn.text = "Install"
+		btn.add_theme_color_override("font_color", Color(0.4, 0.9, 0.5))
+		var captured: Variant = entry
+		btn.pressed.connect(func():
+			resolved = captured
+			done = true
+		)
+		col.add_child(btn)
+
+	var decline_btn := Button.new()
+	decline_btn.text = "Decline"
+	decline_btn.add_theme_color_override("font_color", Color(0.6, 0.6, 0.6))
+	decline_btn.pressed.connect(func():
+		resolved = null
+		done = true
+	)
+	vbox.add_child(decline_btn)
+
+	while not done:
+		await get_tree().process_frame
+
+	backdrop.queue_free()
+	_update_all_displays()
+	return resolved
+
+
+# ── Tāo ice swap prompt ───────────────────────────────────────────────────────
+
+func show_ice_swap_prompt(eligible_servers: Array) -> Variant:
+	var result: Variant = null
+	var done := false
+
+	var backdrop := ColorRect.new()
+	backdrop.color = Color(0, 0, 0, 0.5)
+	backdrop.set_anchors_preset(Control.PRESET_FULL_RECT)
+	backdrop.mouse_filter = Control.MOUSE_FILTER_STOP
+	add_child(backdrop)
+
+	var panel := PanelContainer.new()
+	panel.set_anchors_preset(Control.PRESET_CENTER)
+	panel.custom_minimum_size = Vector2(520, 0)
+	backdrop.add_child(panel)
+
+	var vbox := VBoxContainer.new()
+	vbox.add_theme_constant_override("separation", 10)
+	panel.add_child(vbox)
+
+	var lbl := Label.new()
+	lbl.text = "Tāo: choose two ICE on the same server to swap (or decline)"
+	lbl.add_theme_font_size_override("font_size", 13)
+	lbl.add_theme_color_override("font_color", Color(0.7, 0.95, 0.75))
+	lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	vbox.add_child(lbl)
+
+	var selected_server: Server = null
+	var selected_positions: Array = []
+	var confirm_btn: Button
+
+	var status_lbl := Label.new()
+	status_lbl.text = "Select a server, then click two ICE positions."
+	status_lbl.add_theme_font_size_override("font_size", 11)
+	status_lbl.add_theme_color_override("font_color", Color(0.5, 0.7, 0.55))
+	vbox.add_child(status_lbl)
+
+	# Server buttons
+	var server_vbox := VBoxContainer.new()
+	server_vbox.add_theme_constant_override("separation", 6)
+	vbox.add_child(server_vbox)
+
+	var ice_row_container := VBoxContainer.new()
+	vbox.add_child(ice_row_container)
+
+	var rebuild_ice_row: Callable 
+	rebuild_ice_row = func():
+		for child in ice_row_container.get_children():
+			child.queue_free()
+		if selected_server == null:
+			return
+		var row := HBoxContainer.new()
+		row.add_theme_constant_override("separation", 8)
+		ice_row_container.add_child(row)
+		for i in range(selected_server.ice.size()):
+			var ice: InstalledCard = selected_server.ice[i] as InstalledCard
+			var btn := Button.new()
+			var name_str: String = ice.display_name() if ice.is_rezzed else "Unrezzed ICE"
+			btn.text = "[%d] %s" % [i, name_str]
+			var is_sel: bool = i in selected_positions
+			btn.add_theme_color_override("font_color",
+				Color(0.3, 1.0, 0.5) if is_sel else Color(0.7, 0.85, 0.72))
+			var captured_i := i
+			btn.pressed.connect(func():
+				if captured_i in selected_positions:
+					selected_positions.erase(captured_i)
+				elif selected_positions.size() < 2:
+					selected_positions.append(captured_i)
+				rebuild_ice_row.call()
+				if confirm_btn != null:
+					confirm_btn.disabled = selected_positions.size() != 2
+				status_lbl.text = "Selected: %s" % str(selected_positions) if not selected_positions.is_empty() \
+					else "Click two ICE positions to select them."
+			)
+			row.add_child(btn)
+
+	for server in eligible_servers:
+		var s: Server = server as Server
+		var srv_btn := Button.new()
+		srv_btn.text = s.display_name()
+		srv_btn.add_theme_color_override("font_color", Color(0.6, 0.85, 0.7))
+		srv_btn.pressed.connect(func():
+			selected_server = s
+			selected_positions.clear()
+			rebuild_ice_row.call()
+			status_lbl.text = "Click two ICE positions to swap."
+			if confirm_btn != null:
+				confirm_btn.disabled = true
+		)
+		server_vbox.add_child(srv_btn)
+
+	# Action buttons
+	var btn_row := HBoxContainer.new()
+	btn_row.add_theme_constant_override("separation", 8)
+	vbox.add_child(btn_row)
+
+	var decline_btn := Button.new()
+	decline_btn.text = "Decline"
+	decline_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	decline_btn.pressed.connect(func():
+		result = null
+		done = true
+	)
+	btn_row.add_child(decline_btn)
+
+	confirm_btn = Button.new()
+	confirm_btn.text = "Swap"
+	confirm_btn.disabled = true
+	confirm_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	confirm_btn.add_theme_color_override("font_color", Color(0.3, 1.0, 0.5))
+	confirm_btn.pressed.connect(func():
+		if selected_server != null and selected_positions.size() == 2:
+			result = {
+				"server": selected_server,
+				"pos_a": selected_positions[0],
+				"pos_b": selected_positions[1]
+			}
+		done = true
+	)
+	btn_row.add_child(confirm_btn)
+
+	while not done:
+		await get_tree().process_frame
+
+	backdrop.queue_free()
+	_update_all_displays()
+	return result
+
+
+# ── Carnivore prompt ──────────────────────────────────────────────────────────
+
+func show_carnivore_prompt(card_record: CardRecord) -> bool:
+	var result := false
+	var done   := false
+
+	var backdrop := ColorRect.new()
+	backdrop.color = Color(0, 0, 0, 0.5)
+	backdrop.set_anchors_preset(Control.PRESET_FULL_RECT)
+	backdrop.mouse_filter = Control.MOUSE_FILTER_STOP
+	add_child(backdrop)
+
+	var panel := PanelContainer.new()
+	panel.set_anchors_preset(Control.PRESET_CENTER)
+	panel.custom_minimum_size = Vector2(380, 0)
+	backdrop.add_child(panel)
+
+	var vbox := VBoxContainer.new()
+	vbox.add_theme_constant_override("separation", 10)
+	panel.add_child(vbox)
+
+	var lbl := Label.new()
+	lbl.text = "Carnivore: trash 2 cards from your grip to trash\n%s?" % card_record.title
+	lbl.add_theme_font_size_override("font_size", 13)
+	lbl.add_theme_color_override("font_color", Color(0.9, 0.6, 0.4))
+	lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	vbox.add_child(lbl)
+
+	var grip_lbl := Label.new()
+	grip_lbl.text = "You have %d card(s) in grip." % _ctx.runner_hand.size()
+	grip_lbl.add_theme_font_size_override("font_size", 11)
+	grip_lbl.add_theme_color_override("font_color", Color(0.55, 0.55, 0.6))
+	vbox.add_child(grip_lbl)
+
+	var btn_row := HBoxContainer.new()
+	btn_row.add_theme_constant_override("separation", 8)
+	vbox.add_child(btn_row)
+
+	var no_btn := Button.new()
+	no_btn.text = "Pass"
+	no_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	no_btn.pressed.connect(func():
+		result = false
+		done = true
+	)
+	btn_row.add_child(no_btn)
+
+	var yes_btn := Button.new()
+	yes_btn.text = "Use Carnivore (trash 2)"
+	yes_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	yes_btn.add_theme_color_override("font_color", Color(1.0, 0.5, 0.3))
+	yes_btn.pressed.connect(func():
+		result = true
+		done = true
+	)
+	btn_row.add_child(yes_btn)
+
+	while not done:
+		await get_tree().process_frame
+
+	backdrop.queue_free()
+	return result
