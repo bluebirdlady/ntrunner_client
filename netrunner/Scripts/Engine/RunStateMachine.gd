@@ -25,6 +25,7 @@ var _target_server:   Server       = null
 var _ice_positions:   Array        = []   # ordered ice, outermost first
 var _ice_index:       int          = 0    # current position in _ice_positions
 var _current_phase:   Phase        = Phase.INITIATION
+var _has_passed_ice:  bool         = false  # NSG 6.5.4: jack-out only after passing ice
 
 # Signals — the UI listens to these to update the display
 signal phase_changed(phase: Phase)
@@ -60,9 +61,10 @@ func execute(server_id: String) -> void:
 		push_error("RunStateMachine: unknown server '%s'" % server_id)
 		return
 
-	_target_server = server
-	_ice_positions = server.ice.duplicate()  # snapshot at run start
-	_ice_index     = 0
+	_target_server  = server
+	_ice_positions  = server.ice.duplicate()  # snapshot at run start
+	_ice_index      = 0
+	_has_passed_ice = false
 
 	ctx.run_active        = true
 	ctx.run_ended         = false
@@ -81,6 +83,13 @@ func _phase_initiation() -> void:
 
 	# Notify structural event hooks that a run has commenced
 	await ctx.notify_event("run_start", {"server_id": _target_server.server_id}, interpreter)
+
+	# NSG 6.5.1.c: Paid Ability Window opens during Initiation before the first approach
+	await _execute_paid_ability_and_rez_window(false)
+
+	if ctx.run_ended:
+		await _phase_end()
+		return
 
 	if _ice_positions.is_empty():
 		ctx.log("[Initiation] No ice protecting server — proceeding to root.")
@@ -127,9 +136,6 @@ func _phase_encounter_ice(ice_card: InstalledCard) -> void:
 	# Notify encounter hooks (e.g. Tithe's on_encounter credit gain)
 	await ctx.notify_event("encounter_ice", {"ice": ice_card}, interpreter)
 
-	# Paid ability window before breaking
-	await _execute_paid_ability_and_rez_window(false)
-
 	if ctx.run_ended:
 		await _phase_end()
 		return
@@ -137,19 +143,18 @@ func _phase_encounter_ice(ice_card: InstalledCard) -> void:
 	var subroutines: Array = ability_registry.get_subroutines_for_card(ice_card.card_id, ice_card)
 	if subroutines.is_empty():
 		ctx.log("[Encounter] %s has no implemented subroutines — treating as blank." % ice_card.display_name())
+		# Still open a PAW even for blank ice
+		await _execute_paid_ability_and_rez_window(false)
 	else:
-		# Build encounter state with available icebreakers
 		var encounter := EncounterState.make(ice_card, subroutines, ctx.all_programs_for_encounter(ice_card), ctx)
 		emit_signal("encounter_started", encounter)
 
-		# Iterative break loop — runner acts until they pass
-		if ctx.runner_decision_maker != null:
-			while not ctx.run_ended:
-				var action: Dictionary = await ctx.runner_decision_maker.choose_encounter_action(encounter, ctx)
-				if action.get("type", "") == "done":
-					break
-				await interpreter.process_encounter_action(action, encounter, ctx, ability_registry)
-				emit_signal("encounter_updated", encounter)
+		# NSG 6.5.3.b: symmetric PAW — both players use paid abilities; runner may also break subs
+		await _execute_encounter_window(encounter)
+
+		if ctx.run_ended:
+			await _phase_end()
+			return
 
 		# Resolve unbroken subroutines
 		for i in range(subroutines.size()):
@@ -174,22 +179,23 @@ func _phase_encounter_ice(ice_card: InstalledCard) -> void:
 func _phase_movement() -> void:
 	_set_phase(Phase.MOVEMENT)
 
-	# Notify passing milestone effects
+	# Notify passing milestone effects; track that runner has cleared at least one ice
 	if _ice_index < _ice_positions.size():
+		_has_passed_ice = true
 		await ctx.notify_event("pass_ice", {"ice": _ice_positions[_ice_index]}, interpreter)
 
-	# Replaces the old legacy non-ice window loop with your robust priority engine
 	await _execute_paid_ability_and_rez_window(false)
 	if ctx.run_ended:
 		await _phase_end()
 		return
 
-	# Runner check window for jacking out of standard servers
-	var jack_out := await _runner_jack_out_window()
-	if jack_out:
-		ctx.log("[Movement] Runner jacks out.")
-		await _phase_end()
-		return
+	# NSG 6.5.4: Runner may only jack out after passing at least one piece of ice
+	if _has_passed_ice:
+		var jack_out := await _runner_jack_out_window()
+		if jack_out:
+			ctx.log("[Movement] Runner jacks out.")
+			await _phase_end()
+			return
 
 	# Advance engine position pointer across deep ice setups
 	_ice_index += 1
@@ -316,10 +322,30 @@ func _breach_server() -> void:
 		ctx.log("[Breach] Nothing to access.")
 		return
 
-	for card in access_list:
-		await _access_card(card)
-		if ctx.game_over:
-			break
+	# NSG 7.1/7.2: Runner chooses the order to access cards one at a time.
+	# R&D cards are pre-ordered top-to-bottom; runner choice is meaningful for
+	# root cards mixed with HQ/Archives targets.
+	var access_count: int = 0
+	while not access_list.is_empty() and not ctx.game_over:
+		var target: Variant = await _runner_choose_access_target(access_list)
+		access_list.erase(target)
+		await _access_card(target)
+		access_count += 1
+
+	# Fire breach_complete so identity abilities (e.g. Zahya) can react to access count
+	if not ctx.game_over:
+		await ctx.notify_event("breach_complete", {
+			"server_id": _target_server.server_id,
+			"access_count": access_count
+		}, interpreter)
+
+
+func _runner_choose_access_target(candidates: Array) -> Variant:
+	if candidates.size() == 1:
+		return candidates[0]
+	if ctx.runner_decision_maker != null and ctx.runner_decision_maker.has_method("choose_access_target"):
+		return await ctx.runner_decision_maker.choose_access_target(candidates, ctx)
+	return candidates[0]
 
 
 func _access_card(card: Variant) -> void:
@@ -440,6 +466,7 @@ func _steal_agenda(card_record: CardRecord) -> void:
 			var c: InstalledCard = installed as InstalledCard
 			if c.card_id == card_record.id:
 				s.remove_from_root(c)
+				ctx.unregister_all_card_effects(c.runtime_instance_id)
 				break
 
 	# Fire on_steal ability (e.g. Send a Message, Superconducting Hub)
@@ -476,6 +503,7 @@ func _offer_trash(card: Variant, card_record: CardRecord) -> void:
 			var server: Server = ctx.get_server(installed.server_id)
 			if server:
 				server.remove_from_root(installed)
+			ctx.unregister_all_card_effects(installed.runtime_instance_id)
 			# Cascade-trash any runner programs hosted on this ice
 			if installed.zone == "ice" and not installed.hosted_cards.is_empty():
 				for hosted in installed.hosted_cards.duplicate():
@@ -518,12 +546,44 @@ func _rez_card(card: InstalledCard) -> void:
 	ctx.log("[Rez] Corp rezzes %s for %d credits." % [record.title, rez_cost])
 	emit_signal("ice_rezzed", card)
 
+	# Register ongoing triggers/modifiers now that the card is face-up
+	_register_rezzed_listeners(card)
+
 	# Core notification framework hook
 	await ctx.notify_event("rez_card", {"card": card}, interpreter)
 
 	var on_rez_def = ability_registry.get_on_rez(card.card_id)
 	if on_rez_def != null:
 		await interpreter.execute_trigger(on_rez_def as Dictionary, ctx)
+
+
+# Mirrors TurnManager._register_card_listeners for cards rezzed mid-run.
+# Must be kept in sync with the event list there.
+func _register_rezzed_listeners(card: InstalledCard) -> void:
+	var instance_id: String  = card.runtime_instance_id if card.runtime_instance_id != "" else card.card_id
+	var card_def: Dictionary = ability_registry._abilities.get(card.card_id, {}) as Dictionary
+	for event_type in ["corp_turn_start", "runner_turn_start",
+						"encounter_ice", "pass_ice", "successful_run", "approach_server",
+						"run_end", "on_derez", "corp_scores_agenda", "before_breach",
+						"runner_trashes_during_breach", "runner_installs_virus",
+						"on_advance", "breach_complete"]:
+		var trigger_def = card_def.get(event_type, null)
+		if trigger_def != null:
+			ctx.register_listener(event_type, instance_id, trigger_def as Dictionary)
+	var modifiers: Array = card_def.get("passive_modifiers", []) as Array
+	for mod in modifiers:
+		var mod_dict: Dictionary = mod as Dictionary
+		var extra := {}
+		for key in ["card_id", "method"]:
+			if mod_dict.has(key):
+				extra[key] = mod_dict[key]
+		ctx.register_modifier(
+			mod_dict.get("type", ""),
+			instance_id,
+			mod_dict.get("value", 0),
+			mod_dict.get("conditions", {}) as Dictionary,
+			extra
+		)
 
 
 # Kept for external callers; new code uses encounter loop directly
@@ -567,6 +627,40 @@ func _execute_paid_ability_and_rez_window(can_rez_ice: bool = false) -> void:
 		else:
 			consecutive_passes = 0
 			await _process_window_action(chosen_action, current_priority_actor, can_rez_ice)
+
+	emit_signal("timing_window_closed")
+
+
+func _execute_encounter_window(encounter: EncounterState) -> void:
+	var consecutive_passes := 0
+	var current_actor: String = ctx.active_player  # runner is active player during a run
+	emit_signal("timing_window_opened", current_actor)
+
+	while not ctx.run_ended and consecutive_passes < 2:
+		if current_actor == "runner":
+			if ctx.runner_decision_maker == null:
+				consecutive_passes += 1
+			else:
+				var action: Dictionary = await ctx.runner_decision_maker.choose_encounter_action(encounter, ctx)
+				if action.get("type", "") == "done":
+					consecutive_passes += 1
+				else:
+					consecutive_passes = 0
+					await interpreter.process_encounter_action(action, encounter, ctx, ability_registry)
+					emit_signal("encounter_updated", encounter)
+		else:
+			var dm = ctx.corp_decision_maker
+			if dm == null or not dm.has_method("choose_window_action"):
+				consecutive_passes += 1
+			else:
+				var corp_action: GameAction = await dm.choose_window_action(ctx, "corp", false)
+				if corp_action == null or corp_action.type == "pass":
+					consecutive_passes += 1
+				else:
+					consecutive_passes = 0
+					await _process_window_action(corp_action, "corp", false)
+
+		current_actor = "runner" if current_actor == "corp" else "corp"
 
 	emit_signal("timing_window_closed")
 

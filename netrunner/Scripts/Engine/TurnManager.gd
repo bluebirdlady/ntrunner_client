@@ -78,6 +78,8 @@ func _corp_turn() -> void:
 	ctx.corp_clicks = max(0, CORP_CLICKS_PER_TURN - corp_penalty)
 	ctx.pending_click_penalties["corp"] = 0
 	ctx.corp_installed_this_turn = []   # reset for Seamless Launch restriction
+	ctx.corp_gained_advance_credits_this_turn = false   # reset for Built to Last
+	ctx.corp_last_scored_agenda_points = 0              # reset for Neurospike
 	if corp_penalty > 0:
 		ctx.log("%s loses %d click(s) this turn (deferred penalty)." % [ctx.corp_name(), corp_penalty])
 
@@ -89,6 +91,12 @@ func _corp_turn() -> void:
 	])
 	# Fire start-of-turn triggers (assets, upgrades, etc.)
 	await ctx.notify_event("corp_turn_start", {}, interpreter)
+
+	# Pre-click free actions: Corp may rez assets/upgrades as paid abilities before spending clicks.
+	# Handled separately so the click loop only processes click-costing actions.
+	if ctx.corp_decision_maker != null and ctx.corp_decision_maker.has_method("get_pre_click_rez_actions"):
+		for rez_action in ctx.corp_decision_maker.get_pre_click_rez_actions(ctx):
+			await _do_rez_card("corp", rez_action as GameAction)
 
 	# Action phase
 	while ctx.corp_clicks > 0 and not ctx.game_over:
@@ -129,6 +137,7 @@ func _corp_mandatory_draw() -> void:
 
 
 func _corp_discard_to_hand_limit() -> void:
+	var did_discard := false
 	while ctx.corp_hand.size() > ctx.corp_max_hand_size() and not ctx.game_over:
 		# Discard the last card (AI discards from the end for simplicity)
 		var discarded: Dictionary = ctx.corp_hand.pop_back() as Dictionary
@@ -137,6 +146,8 @@ func _corp_discard_to_hand_limit() -> void:
 		if record != null:
 			ctx.corp_discard_facedown[record.title] = true   # hand discards always facedown
 		ctx.log("%s discards %s to hand limit." % [ctx.corp_name(), record.title if record else "?"])
+		did_discard = true
+	ctx.corp_discarded_to_hand_limit_last_turn = did_discard
 	emit_signal("hand_changed", "corp")
 
 
@@ -228,9 +239,19 @@ func _validate_action(player: String, action: GameAction) -> Dictionary:
 				return {"ok": false, "reason": "Not enough clicks"}
 			return {"ok": true, "reason": ""}
 
-		"gain_credits", "draw_card", "run":
+		"gain_credits", "draw_card":
 			if clicks < 1:
 				return {"ok": false, "reason": "Not enough clicks"}
+			return {"ok": true, "reason": ""}
+
+		"run":
+			if clicks < 1:
+				return {"ok": false, "reason": "Not enough clicks"}
+			var target: String = action.params.get("server_id", "")
+			var rp_mods: Array = ctx._state_modifiers.get("block_remote_runs_unless_ran_central", [])
+			if not rp_mods.is_empty() and target.begins_with("remote_"):
+				if ctx.runner_centrals_run_this_turn.is_empty():
+					return {"ok": false, "reason": "Replicating Perfection: you must run a central server before running on a remote."}
 			return {"ok": true, "reason": ""}
 
 		"install":
@@ -470,6 +491,9 @@ func _do_advance(player: String, action: GameAction) -> void:
 		ctx.player_name(player), card.display_name(), card.get_counter("advancement")
 	])
 
+	# Fire on_advance for identity abilities (e.g. Weyland: Built to Last)
+	await ctx.notify_event("on_advance", {"card_id": card_id}, interpreter)
+
 	# Check if agenda can be scored
 	if card.card_record != null and card.card_record.is_agenda():
 		if card.meets_advancement_requirement():
@@ -648,6 +672,7 @@ func _score_agenda(card: InstalledCard) -> void:
 	var record: CardRecord = card.card_record
 	ctx.log("%s scores %s! (%d agenda points)" % [ctx.corp_name(), record.title, record.agenda_points])
 	ctx.corp_score_area.append(record)
+	ctx.corp_last_scored_agenda_points = record.agenda_points
 
 	# Remove from server
 	var server: Server = ctx.get_server(card.server_id)
@@ -697,10 +722,26 @@ func _register_identity_listeners(instance_id: String, card_id: String) -> void:
 	for event_type in ["corp_turn_start", "runner_turn_start",
 					"encounter_ice", "pass_ice", "successful_run", "approach_server",
 					"run_end", "on_derez", "corp_scores_agenda", "before_breach",
-						"runner_trashes_during_breach", "runner_installs_virus"]:
+					"runner_trashes_during_breach", "runner_installs_virus",
+					"on_advance", "breach_complete"]:
 		var trigger_def = card_def.get(event_type, null)
 		if trigger_def != null:
 			ctx.register_listener(event_type, instance_id, trigger_def as Dictionary)
+
+	var id_modifiers: Array = card_def.get("passive_modifiers", []) as Array
+	for mod in id_modifiers:
+		var mod_dict: Dictionary = mod as Dictionary
+		var extra := {}
+		for key in ["card_id", "method"]:
+			if mod_dict.has(key):
+				extra[key] = mod_dict[key]
+		ctx.register_modifier(
+			mod_dict.get("type", ""),
+			instance_id,
+			mod_dict.get("value", 0),
+			mod_dict.get("conditions", {}) as Dictionary,
+			extra
+		)
 
 
 func _register_card_listeners(installed: InstalledCard) -> void:
@@ -714,7 +755,8 @@ func _register_card_listeners(installed: InstalledCard) -> void:
 	for event_type in ["corp_turn_start", "runner_turn_start",
 						"encounter_ice", "pass_ice", "successful_run", "approach_server",
 						"run_end", "on_derez", "corp_scores_agenda", "before_breach",
-						"runner_trashes_during_breach", "runner_installs_virus"]:
+						"runner_trashes_during_breach", "runner_installs_virus",
+						"on_advance", "breach_complete"]:
 		var trigger_def = card_def.get(event_type, null)
 		if trigger_def != null:
 			ctx.register_listener(event_type, instance_id, trigger_def as Dictionary)

@@ -59,6 +59,7 @@ func _process(delta: float) -> void:
 		_char_timer -= speed
 		_displayed  += 1
 		_text_label.text = _full_text.substr(0, _displayed)
+		_update_scroll()
 
 	if _displayed >= _full_text.length():
 		_finish_typing()
@@ -116,12 +117,15 @@ func _build_ui() -> void:
 	# Scrolling text container
 	var scroll := ScrollContainer.new()
 	scroll.set_anchors_preset(Control.PRESET_FULL_RECT)
-	scroll.set_offsets_preset(Control.PRESET_FULL_RECT)
 	scroll.offset_left   = 160
 	scroll.offset_right  = -160
 	scroll.offset_top    = 80
 	scroll.offset_bottom = -80
 	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	scroll.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_AUTO
+	# Make the container expand vertically inside its parent
+	scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	add_child(scroll)
 
 	_text_label = RichTextLabel.new()
@@ -129,7 +133,8 @@ func _build_ui() -> void:
 	_text_label.fit_content      = true
 	_text_label.scroll_active    = false
 	_text_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	# Typewriter-green monospace feel
+	_text_label.size_flags_vertical = Control.SIZE_SHRINK_CENTER 
+		# Typewriter-green monospace feel
 	_text_label.add_theme_color_override("default_color",       Color(0.72, 0.92, 0.72))
 	_text_label.add_theme_color_override("font_shadow_color",   Color(0.2, 0.6, 0.2, 0.4))
 	_text_label.add_theme_constant_override("shadow_offset_x",  1)
@@ -153,7 +158,17 @@ func _build_ui() -> void:
 	# Scanline overlay
 	_scanlines = _make_scanlines()
 	add_child(_scanlines)
+	_bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	vignette.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_scanlines.mouse_filter = Control.MOUSE_FILTER_IGNORE
 
+func _update_scroll() -> void:
+	var scroll = _text_label.get_parent() as ScrollContainer
+	if scroll == null:
+		return
+	await get_tree().process_frame
+	# Just accessing the v_scroll bar's max_value forces a refresh
+	var _dummy = scroll.get_v_scroll_bar().max_value
 
 func _make_vignette() -> Control:
 	var vignette := ColorRect.new()

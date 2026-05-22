@@ -12,6 +12,7 @@ signal modal_choice_resolved(indices: Array)
 signal server_choice_resolved(server_id: String)
 signal search_choice_resolved(card: CardRecord)
 signal payment_option_resolved(option: Variant)
+signal game_over_acknowledged
 
 # ── NSG Game Symbol paths ─────────────────────────────────────────────────────
 const SYM_BASE   := "res://Assets/Art/Game Symbols/Exported/"
@@ -456,7 +457,7 @@ func _handle_corp_action_display(action: GameAction) -> void:
 			var r: CardRecord = action.params.get("card_record", null)
 			if r != null:
 				_log_game("  !! Corp scores %s!" % r.title)
-				_show_corp_event_with_card("SCORES", r, Color(0.5, 0.15, 0.15))
+				_show_agenda_scored(r)
 
 
 func _handle_runner_action_display(action: GameAction) -> void:
@@ -495,64 +496,79 @@ func _show_corp_event_with_card(label: String, card: CardRecord, color: Color) -
 
 
 func _show_corp_card_reveal(label: String, card: CardRecord, color: Color) -> void:
-	var state_panel: Control = resource_label.get_parent().get_parent() as Control
-	if state_panel == null:
-		return
+	const POPUP_W  := 260.0
+	const MARGIN   := 16.0
 
 	var panel := PanelContainer.new()
 	panel.modulate.a = 0.0
-	panel.set_anchors_preset(Control.PRESET_TOP_WIDE)
-	panel.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
-	panel.custom_minimum_size = Vector2(480, 0)
-	state_panel.add_child(panel)
+	panel.custom_minimum_size = Vector2(POPUP_W, 0)
+	panel.set_anchors_preset(Control.PRESET_TOP_RIGHT)
+	panel.grow_horizontal = Control.GROW_DIRECTION_BEGIN
+	panel.grow_vertical   = Control.GROW_DIRECTION_END
+	panel.offset_right    = -MARGIN
+	panel.offset_top      = MARGIN
+	self.add_child(panel)
 
 	var style := StyleBoxFlat.new()
-	style.bg_color = Color(color.r, color.g, color.b, 0.93)
-	style.border_color = Color(color.r + 0.2, color.g + 0.2, color.b + 0.3, 1.0)
-	style.border_width_top = 1
-	style.border_width_bottom = 1
-	style.corner_radius_top_left = 4
-	style.corner_radius_top_right = 4
-	style.corner_radius_bottom_left = 4
-	style.corner_radius_bottom_right = 4
+	style.bg_color             = Color(0.04, 0.05, 0.10, 0.96)
+	style.border_color         = Color(0.0, 0.78, 0.95, 0.9)
+	style.border_width_left    = 3
+	style.border_width_top     = 1
+	style.border_width_right   = 1
+	style.border_width_bottom  = 1
+	style.corner_radius_top_left     = 0
+	style.corner_radius_top_right    = 2
+	style.corner_radius_bottom_left  = 0
+	style.corner_radius_bottom_right = 2
 	style.content_margin_left   = 10
 	style.content_margin_right  = 10
 	style.content_margin_top    = 8
-	style.content_margin_bottom = 8
+	style.content_margin_bottom = 10
 	panel.add_theme_stylebox_override("panel", style)
 
+	var outer_vbox := VBoxContainer.new()
+	outer_vbox.add_theme_constant_override("separation", 6)
+	panel.add_child(outer_vbox)
+
+	var lbl_header := Label.new()
+	lbl_header.text = "// CORP %s //" % label.to_upper()
+	lbl_header.add_theme_font_size_override("font_size", 9)
+	lbl_header.add_theme_color_override("font_color", Color(0.0, 0.82, 0.95))
+	outer_vbox.add_child(lbl_header)
+
+	var sep := HSeparator.new()
+	sep.add_theme_color_override("color", Color(0.0, 0.6, 0.75, 0.5))
+	outer_vbox.add_child(sep)
+
 	var hbox := HBoxContainer.new()
-	hbox.add_theme_constant_override("separation", 12)
-	panel.add_child(hbox)
+	hbox.add_theme_constant_override("separation", 10)
+	outer_vbox.add_child(hbox)
 
 	var card_view := CardView.new()
-	card_view.custom_minimum_size = Vector2(65, 91)
+	card_view.custom_minimum_size    = Vector2(52, 73)
+	card_view.size_flags_horizontal  = Control.SIZE_SHRINK_BEGIN
+	card_view.size_flags_vertical    = Control.SIZE_SHRINK_BEGIN
 	hbox.add_child(card_view)
 	card_view.setup(card, true)
 
-	var vbox := VBoxContainer.new()
-	vbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	hbox.add_child(vbox)
-
-	var lbl_action := Label.new()
-	lbl_action.text = "CORP %s" % label.to_upper()
-	lbl_action.add_theme_font_size_override("font_size", 10)
-	lbl_action.add_theme_color_override("font_color", Color(0.6, 0.7, 0.9))
-	vbox.add_child(lbl_action)
+	var info_vbox := VBoxContainer.new()
+	info_vbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	info_vbox.add_theme_constant_override("separation", 3)
+	hbox.add_child(info_vbox)
 
 	var lbl_title := Label.new()
 	lbl_title.text = card.title
-	lbl_title.add_theme_font_size_override("font_size", 15)
-	lbl_title.add_theme_color_override("font_color", Color(0.95, 0.95, 1.0))
+	lbl_title.add_theme_font_size_override("font_size", 13)
+	lbl_title.add_theme_color_override("font_color", Color(0.92, 0.95, 1.0))
 	lbl_title.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	vbox.add_child(lbl_title)
+	info_vbox.add_child(lbl_title)
 
 	if card.agenda_points > 0:
 		var lbl_pts := Label.new()
-		lbl_pts.text = "%d agenda point%s" % [card.agenda_points, "s" if card.agenda_points != 1 else ""]
-		lbl_pts.add_theme_font_size_override("font_size", 11)
-		lbl_pts.add_theme_color_override("font_color", Color(1.0, 0.8, 0.4))
-		vbox.add_child(lbl_pts)
+		lbl_pts.text = "[ %d AGENDA PT%s ]" % [card.agenda_points, "S" if card.agenda_points != 1 else ""]
+		lbl_pts.add_theme_font_size_override("font_size", 10)
+		lbl_pts.add_theme_color_override("font_color", Color(1.0, 0.75, 0.2))
+		info_vbox.add_child(lbl_pts)
 
 	var tween := create_tween()
 	tween.tween_property(panel, "modulate:a", 1.0, 0.18)
@@ -562,6 +578,85 @@ func _show_corp_card_reveal(label: String, card: CardRecord, color: Color) -> vo
 		return
 	tween = create_tween()
 	tween.tween_property(panel, "modulate:a", 0.0, 0.3)
+	await tween.finished
+	if is_instance_valid(panel):
+		panel.queue_free()
+
+
+func _show_agenda_scored(card: CardRecord) -> void:
+	var panel := PanelContainer.new()
+	panel.modulate.a = 0.0
+	panel.custom_minimum_size = Vector2(320, 0)
+	panel.set_anchors_preset(Control.PRESET_CENTER)
+	panel.grow_horizontal = Control.GROW_DIRECTION_BOTH
+	panel.grow_vertical   = Control.GROW_DIRECTION_BOTH
+	self.add_child(panel)
+
+	var style := StyleBoxFlat.new()
+	style.bg_color            = Color(0.06, 0.03, 0.03, 0.97)
+	style.border_color        = Color(0.95, 0.35, 0.1, 1.0)
+	style.border_width_top    = 3
+	style.border_width_left   = 1
+	style.border_width_right  = 1
+	style.border_width_bottom = 1
+	style.corner_radius_top_left     = 0
+	style.corner_radius_top_right    = 0
+	style.corner_radius_bottom_left  = 2
+	style.corner_radius_bottom_right = 2
+	style.content_margin_left   = 24
+	style.content_margin_right  = 24
+	style.content_margin_top    = 16
+	style.content_margin_bottom = 18
+	panel.add_theme_stylebox_override("panel", style)
+
+	var vbox := VBoxContainer.new()
+	vbox.add_theme_constant_override("separation", 8)
+	panel.add_child(vbox)
+
+	var lbl_header := Label.new()
+	lbl_header.text = "// CORP SCORES //"
+	lbl_header.add_theme_font_size_override("font_size", 10)
+	lbl_header.add_theme_color_override("font_color", Color(0.95, 0.45, 0.15))
+	lbl_header.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	vbox.add_child(lbl_header)
+
+	var lbl_title := Label.new()
+	lbl_title.text = card.title
+	lbl_title.add_theme_font_size_override("font_size", 26)
+	lbl_title.add_theme_color_override("font_color", Color(0.95, 0.92, 0.88))
+	lbl_title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	lbl_title.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	vbox.add_child(lbl_title)
+
+	if card.agenda_points > 0:
+		var lbl_pts := Label.new()
+		lbl_pts.text = "[ %d AGENDA PT%s ]" % [card.agenda_points, "S" if card.agenda_points != 1 else ""]
+		lbl_pts.add_theme_font_size_override("font_size", 13)
+		lbl_pts.add_theme_color_override("font_color", Color(1.0, 0.78, 0.2))
+		lbl_pts.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		vbox.add_child(lbl_pts)
+
+	var sep := HSeparator.new()
+	sep.add_theme_color_override("color", Color(0.7, 0.25, 0.1, 0.6))
+	vbox.add_child(sep)
+
+	var corp_pts: int  = _ctx.corp_agenda_points()
+	var pts_to_win: int = _ctx.agenda_points_to_win
+	var lbl_score := Label.new()
+	lbl_score.text = "CORP: %d / %d" % [corp_pts, pts_to_win]
+	lbl_score.add_theme_font_size_override("font_size", 14)
+	lbl_score.add_theme_color_override("font_color", Color(0.85, 0.55, 0.3))
+	lbl_score.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	vbox.add_child(lbl_score)
+
+	var tween := create_tween()
+	tween.tween_property(panel, "modulate:a", 1.0, 0.15)
+	await tween.finished
+	await get_tree().create_timer(3.0).timeout
+	if not is_instance_valid(panel):
+		return
+	tween = create_tween()
+	tween.tween_property(panel, "modulate:a", 0.0, 0.4)
 	await tween.finished
 	if is_instance_valid(panel):
 		panel.queue_free()
@@ -625,6 +720,35 @@ func _on_game_over(winner: String, reason: String) -> void:
 	pulse.tween_property(headline, "modulate:a", 0.6, 1.2)
 	pulse.tween_property(headline, "modulate:a", 1.0, 1.2)
 
+	# Hold so the player can read the outcome, then prompt to continue
+	await get_tree().create_timer(1.5).timeout
+
+	var continue_lbl := Label.new()
+	continue_lbl.text = "// CLICK TO CONTINUE //"
+	continue_lbl.add_theme_font_size_override("font_size", 11)
+	continue_lbl.add_theme_color_override("font_color", Color(0.38, 0.38, 0.5))
+	continue_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	continue_lbl.modulate.a = 0.0
+	vbox.add_child(continue_lbl)
+
+	tween = create_tween()
+	tween.tween_property(continue_lbl, "modulate:a", 1.0, 0.5)
+
+	# Invisible full-rect button captures any click
+	var continue_btn := Button.new()
+	continue_btn.flat = true
+	continue_btn.set_anchors_preset(Control.PRESET_FULL_RECT)
+	var empty_style := StyleBoxEmpty.new()
+	continue_btn.add_theme_stylebox_override("normal",  empty_style)
+	continue_btn.add_theme_stylebox_override("hover",   empty_style)
+	continue_btn.add_theme_stylebox_override("pressed", empty_style)
+	continue_btn.add_theme_stylebox_override("focus",   empty_style)
+	overlay.add_child(continue_btn)
+
+	await continue_btn.pressed
+	pulse.kill()
+	game_over_acknowledged.emit()
+
 var _toast_queue: Array = []
 var _toast_showing: bool = false
 
@@ -645,48 +769,49 @@ func _process_toast_queue() -> void:
 
 
 func _display_toast(message: String, bg_color: Color, duration: float) -> void:
-	# Build the toast panel on top of the StatePanel
-	var state_panel: Control = resource_label.get_parent().get_parent() as Control
-	if state_panel == null:
-		return
+	const POPUP_W := 280.0
+	const MARGIN  := 16.0
 
 	var panel := PanelContainer.new()
 	panel.modulate.a = 0.0
-	# Position: top-centre of StatePanel
-	panel.set_anchors_preset(Control.PRESET_TOP_WIDE)
-	panel.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
-	panel.custom_minimum_size = Vector2(360, 0)
-	state_panel.add_child(panel)
+	panel.custom_minimum_size = Vector2(POPUP_W, 0)
+	panel.set_anchors_preset(Control.PRESET_TOP_RIGHT)
+	panel.grow_horizontal = Control.GROW_DIRECTION_BEGIN
+	panel.grow_vertical   = Control.GROW_DIRECTION_END
+	panel.offset_right    = -MARGIN
+	panel.offset_top      = MARGIN
+	self.add_child(panel)
 
-	# Style
 	var stylebox := StyleBoxFlat.new()
-	stylebox.bg_color       = Color(bg_color.r, bg_color.g, bg_color.b, 0.92)
-	stylebox.corner_radius_top_left     = 6
-	stylebox.corner_radius_top_right    = 6
-	stylebox.corner_radius_bottom_left  = 6
-	stylebox.corner_radius_bottom_right = 6
-	stylebox.content_margin_left   = 16
-	stylebox.content_margin_right  = 16
-	stylebox.content_margin_top    = 8
-	stylebox.content_margin_bottom = 8
+	stylebox.bg_color            = Color(0.04, 0.05, 0.10, 0.93)
+	stylebox.border_color        = Color(bg_color.r * 1.8 + 0.1, bg_color.g * 1.8 + 0.1, bg_color.b * 2.0 + 0.2, 0.9)
+	stylebox.border_width_left   = 3
+	stylebox.border_width_top    = 1
+	stylebox.border_width_right  = 1
+	stylebox.border_width_bottom = 1
+	stylebox.corner_radius_top_left     = 0
+	stylebox.corner_radius_top_right    = 2
+	stylebox.corner_radius_bottom_left  = 0
+	stylebox.corner_radius_bottom_right = 2
+	stylebox.content_margin_left   = 12
+	stylebox.content_margin_right  = 12
+	stylebox.content_margin_top    = 7
+	stylebox.content_margin_bottom = 7
 	panel.add_theme_stylebox_override("panel", stylebox)
 
 	var lbl := Label.new()
 	lbl.text = message
-	lbl.add_theme_font_size_override("font_size", 14)
-	lbl.add_theme_color_override("font_color", Color(0.95, 0.95, 1.0))
-	lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	lbl.add_theme_font_size_override("font_size", 12)
+	lbl.add_theme_color_override("font_color", Color(0.0, 0.88, 1.0))
+	lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
 	panel.add_child(lbl)
 
-	# Fade in
 	var tween := create_tween()
 	tween.tween_property(panel, "modulate:a", 1.0, 0.18)
 	await tween.finished
 
-	# Hold
 	await get_tree().create_timer(duration).timeout
 
-	# Fade out
 	if not is_instance_valid(panel):
 		return
 	tween = create_tween()
@@ -998,10 +1123,17 @@ func show_server_choice_prompt(allowed_servers: Array) -> String:
 	prompt_box.add_child(lbl)
 
 	for server_id in allowed_servers:
-		var display: String = {"hq": "HQ", "rd": "R&D", "archives": "Archives"}.get(server_id, server_id)
+		var display: String = {"hq": "HQ", "rd": "R&D", "archives": "Archives"}.get(server_id, "")
+		if display == "":
+			# Remote server: "remote_0" → "Remote 1" (1-indexed for readability)
+			var parts: PackedStringArray = server_id.split("_")
+			if parts.size() >= 2 and parts[0] == "remote":
+				display = "Remote %d" % (parts[1].to_int() + 1)
+			else:
+				display = server_id
 		var btn := Button.new()
 		btn.text = display
-		var sid: String = server_id  # capture
+		var sid: String = server_id  # capture raw ID — ctx.get_server() expects this
 		btn.pressed.connect(func():
 			server_choice_resolved.emit(sid)
 		)

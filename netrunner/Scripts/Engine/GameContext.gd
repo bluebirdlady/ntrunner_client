@@ -76,6 +76,14 @@ var runner_trashed_during_breach_this_turn: bool = false
 var runner_program_install_discounted_this_turn: bool = false
 # Tracks whether Carnivore has been used this turn (once per turn)
 var runner_carnivore_used_this_turn: bool = false
+# Tracks whether Corp has already gained Built-to-Last advance credits this turn
+var corp_gained_advance_credits_this_turn: bool = false
+# Tracks whether Corp discarded to hand limit last turn (Restoring Humanity)
+var corp_discarded_to_hand_limit_last_turn: bool = false
+# Agenda points on the last agenda the Corp scored this turn (0 if none yet).
+# Used by Neurospike to determine both play legality and damage amount.
+# Cleared at the start of each Corp turn.
+var corp_last_scored_agenda_points: int = 0
 # Run modifiers: set by run-initiating events, cleared when the run ends.
 # Supported keys:
 #   "extra_rez_cost"    : int — Corp pays extra to rez ice (Tread Lightly)
@@ -161,6 +169,16 @@ func runner_mu_used() -> int:
 # MU still available for programs
 func runner_mu_available() -> int:
 	return runner_total_mu() - runner_mu_used()
+
+func runner_link_bonus() -> int:
+	var bonus := 0
+	for mod in _state_modifiers.get("link_bonus", []):
+		bonus += (mod as Dictionary).get("value", 0) as int
+	return bonus
+
+func runner_total_link() -> int:
+	var base: int = runner_identity.base_link if runner_identity != null and runner_identity.base_link >= 0 else 0
+	return base + runner_link_bonus()
 
 # Set by TurnManager at game start based on identities (6 for starters, 7 otherwise)
 var agenda_points_to_win: int = 7

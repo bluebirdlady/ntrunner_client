@@ -6,7 +6,7 @@ extends CanvasLayer
 # Emits mission_selected(mission_id) when a mission is chosen.
 # Emits fiction_requested(fiction_id) for re-reading unlocked fiction.
 
-signal mission_selected(mission_id: String)
+signal mission_selected(mission_id: String, ai_level: int)
 signal fiction_requested(fiction_id: String)
 signal starter_match_requested()
 
@@ -261,6 +261,15 @@ func _make_mission_card(mission: Dictionary) -> Control:
 		badge.add_theme_color_override("font_color", COLOR_COMPLETE)
 		title_row.add_child(badge)
 
+	var ai_level: int = mission.get("ai_level", 0) as int
+	if ai_level >= 1:
+		var ai_badge := Label.new()
+		ai_badge.text = "◈ TACTICAL AI" if ai_level == 1 else "◈ PREDICTIVE AI"
+		ai_badge.add_theme_font_size_override("font_size", 10)
+		ai_badge.add_theme_color_override("font_color",
+			Color(0.85, 0.65, 0.2) if ai_level == 1 else Color(0.9, 0.42, 0.25))
+		title_row.add_child(ai_badge)
+
 	var subtitle := Label.new()
 	subtitle.text = mission.get("subtitle", "")
 	subtitle.add_theme_font_size_override("font_size", 10)
@@ -284,14 +293,46 @@ func _make_mission_card(mission: Dictionary) -> Control:
 		desc.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 		vbox.add_child(desc)
 
-	# Run button
-	var run_btn := Button.new()
-	run_btn.text = "▶  INITIATE RUN" if not is_complete else "▶  RUN AGAIN"
-	run_btn.add_theme_color_override("font_color",
-		COLOR_AVAILABLE if not is_complete else COLOR_COMPLETE)
-	var mid: String = mission.get("id", "")
-	run_btn.pressed.connect(func(): _on_mission_run_pressed(mid))
-	vbox.add_child(run_btn)
+	var mid: String         = mission.get("id", "")
+	var default_level: int  = mission.get("ai_level", 0) as int
+
+	if not is_complete:
+		# First run — locked to the mission's designed AI level
+		var run_btn := Button.new()
+		run_btn.text = "▶  INITIATE RUN"
+		run_btn.add_theme_color_override("font_color", COLOR_AVAILABLE)
+		run_btn.pressed.connect(func(): _on_mission_run_pressed(mid, default_level))
+		vbox.add_child(run_btn)
+	else:
+		# Mission cleared — let the player choose a difficulty for replay
+		var diff_sep := HSeparator.new()
+		diff_sep.add_theme_color_override("separation_color", COLOR_BORDER)
+		vbox.add_child(diff_sep)
+
+		var diff_label := Label.new()
+		diff_label.text = "REPLAY DIFFICULTY:"
+		diff_label.add_theme_font_size_override("font_size", 9)
+		diff_label.add_theme_color_override("font_color", Color(0.35, 0.45, 0.38))
+		vbox.add_child(diff_label)
+
+		var btn_row := HBoxContainer.new()
+		btn_row.add_theme_constant_override("separation", 4)
+		vbox.add_child(btn_row)
+
+		var difficulty_tiers := [
+			{"label": "▶  STANDARD",   "level": 0, "color": COLOR_COMPLETE},
+			{"label": "▶  TACTICAL",   "level": 1, "color": Color(0.85, 0.65, 0.2)},
+			{"label": "▶  PREDICTIVE", "level": 2, "color": Color(0.9, 0.42, 0.25)},
+		]
+		for tier in difficulty_tiers:
+			var btn := Button.new()
+			btn.text = tier["label"] as String
+			btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+			btn.add_theme_font_size_override("font_size", 10)
+			btn.add_theme_color_override("font_color", tier["color"] as Color)
+			var lvl: int = tier["level"] as int
+			btn.pressed.connect(func(): _on_mission_run_pressed(mid, lvl))
+			btn_row.add_child(btn)
 
 	return panel
 
@@ -328,18 +369,19 @@ func _populate_fiction_archive() -> void:
 
 # ── Event handlers ────────────────────────────────────────────────────────────
 
-func _on_mission_run_pressed(mission_id: String) -> void:
-	# Show pre-match fiction, then emit mission_selected
+func _on_mission_run_pressed(mission_id: String, ai_level: int) -> void:
+	# Show pre-match fiction (first read only), then emit mission_selected with level.
 	var mission := _campaign_state.get_mission(mission_id)
 	var fiction_id: String = mission.get("fiction_pre", "")
-	if fiction_id != "" and _fiction_viewer != null:
+	var already_read: bool = _campaign_state.is_fiction_read(fiction_id)
+	if fiction_id != "" and not already_read and _fiction_viewer != null:
 		_fiction_viewer.show_fiction(
 			_campaign_state.get_fiction_text(fiction_id),
-			func(): mission_selected.emit(mission_id)
+			func(): mission_selected.emit(mission_id, ai_level)
 		)
 		_refresh()   # update "read" state in fiction archive
 	else:
-		mission_selected.emit(mission_id)
+		mission_selected.emit(mission_id, ai_level)
 
 
 func _on_fiction_reread(fiction_id: String) -> void:

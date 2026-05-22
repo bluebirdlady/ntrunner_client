@@ -34,10 +34,8 @@ func _init(ability_registry: AbilityRegistry) -> void:
 # ── Turn-time interface ───────────────────────────────────────────────────────
 
 func choose_action(ctx: GameContext) -> GameAction:
-	# 0. Rez any unrezzed assets or upgrades we can afford
-	var to_rez := _find_unrezzed_asset_or_upgrade(ctx)
-	if to_rez != null and ctx.corp_credits >= max(0, to_rez.card_record.cost):
-		return GameAction.rez_card(to_rez.card_id, to_rez.runtime_instance_id)
+	# Free rezzes are handled by get_pre_click_rez_actions() called from TurnManager
+	# before this loop — do not mix free paid-actions with click actions here.
 
 	# 0b. Use click actions on installed Corp cards (e.g. Regolith Mining License)
 	var card_with_action := _find_corp_click_action(ctx)
@@ -149,6 +147,19 @@ func choose_card_from_hand(hand: Array, _ctx: GameContext) -> Variant:
 			best = entry
 	return best
 
+
+
+func get_pre_click_rez_actions(ctx: GameContext) -> Array:
+	var actions: Array = []
+	for server in ctx.servers.values():
+		var s: Server = server as Server
+		for card in s.root:
+			var c: InstalledCard = card as InstalledCard
+			if not c.is_rezzed and c.card_record != null:
+				var ctype: String = c.card_record.card_type
+				if (ctype == "asset" or ctype == "upgrade") and ctx.corp_credits >= max(0, c.card_record.cost):
+					actions.append(GameAction.rez_card(c.card_id, c.runtime_instance_id))
+	return actions
 
 
 func choose_window_action(ctx: GameContext, actor: String, can_rez_ice: bool) -> GameAction:
@@ -403,7 +414,7 @@ func choose_use_anoetic_void(ctx: GameContext) -> bool:
 func choose_activate_clearinghouse(card: InstalledCard, ctx: GameContext) -> bool:
 	# Activate if the damage would flatline or nearly flatline the runner,
 	# OR if the runner is close to winning (desperate times).
-	var counters: int    = card.get_counter("advancement") + 1   # +1 for counter we add
+	var counters: int    = card.get_counter("advancement")   # read actual counters; corp_turn_start fires before any clicks
 	var runner_grip: int = ctx.runner_hand.size()
 
 	# Always activate if it kills

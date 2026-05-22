@@ -9,16 +9,19 @@ var ctx: GameContext
 var ability_registry: AbilityRegistry
 var turn_manager: TurnManager
 var run_machine: RunStateMachine
+var corp_brain: CorpTurnAI
 var runner_brain: HumanDecisionMaker
 var _run_scene: RunScene = null
 
 # ── Campaign mode ─────────────────────────────────────────────────────────────
-var campaign_mode:        bool     = false
-var campaign_runner_deck: Array    = []
-var campaign_runner_id:   String   = ""
-var campaign_corp_deck:   Array    = []
-var campaign_corp_id:     String   = ""
-var game_over_callback:   Callable
+var campaign_mode:           bool     = false
+var campaign_runner_deck:    Array    = []
+var campaign_runner_id:      String   = ""
+var campaign_corp_deck:      Array    = []
+var campaign_corp_id:        String   = ""
+var campaign_ai_level:       int      = 0
+var campaign_available_pool: Array    = []   # full format pool for AI prior (not the player's deck)
+var game_over_callback:      Callable
 
 
 func _ready() -> void:
@@ -44,7 +47,15 @@ func _init_and_start() -> void:
 	else:
 		print("AbilityRegistry loaded %d card definitions" % ability_registry._abilities.size())
 
-	var corp_brain := CorpTurnAI.new(ability_registry)
+	# Select Corp AI level — heuristic (0), tactical 1-ply (1), strategic 2-ply (2)
+	match campaign_ai_level:
+		1:
+			corp_brain = CorpTurnAI_Tactical.new(ability_registry)
+		2:
+			corp_brain = CorpTurnAI_Strategic.new(ability_registry)
+		_:
+			corp_brain = CorpTurnAI.new(ability_registry)
+
 	runner_brain = HumanDecisionMaker.new()
 
 	ctx.corp_decision_maker   = corp_brain
@@ -52,6 +63,10 @@ func _init_and_start() -> void:
 
 	if campaign_mode:
 		_populate_campaign_state()
+		# Seed the Bayesian runner model from public info (identity + format pool),
+		# not from the player's actual deck list.
+		if corp_brain.has_method("seed_runner_model"):
+			corp_brain.seed_runner_model(campaign_runner_id, campaign_available_pool)
 	else:
 		_populate_test_state()
 
@@ -67,10 +82,11 @@ func _init_and_start() -> void:
 
 	game_ui.setup(ctx, turn_manager, run_machine, ability_registry)
 
-	# Route UI actions to the runner brain
+	# Route UI actions to the runner brain, and observe them for the AI model
 	game_ui.action_requested.connect(func(action: GameAction):
 		if ctx.active_player == "runner":
 			runner_brain.action_selected.emit(action)
+			_observe_runner_action(action)
 	)
 
 	# Default proxies → GameUI (used outside of runs)
@@ -171,10 +187,32 @@ func _on_run_scene_complete() -> void:
 	game_ui._update_all_displays()
 
 
+# ── Runner action observation ─────────────────────────────────────────────────
+
+# Forward observable runner actions to the Corp AI model (Strategic level only).
+func _observe_runner_action(action: GameAction) -> void:
+	if not corp_brain.has_method("observe_runner_action"):
+		return
+	var params: Dictionary = {}
+	match action.type:
+		"install":
+			var cr: CardRecord = action.params.get("card_record", null) as CardRecord
+			if cr != null:
+				params["card_id"] = cr.id
+		"play_operation":
+			var cr: CardRecord = action.params.get("card_record", null) as CardRecord
+			if cr != null:
+				params["card_id"] = cr.id
+		"run":
+			params = action.params.duplicate()
+	corp_brain.observe_runner_action(action.type, params)
+
+
 # ── Game loop ─────────────────────────────────────────────────────────────────
 
 func _start_game_loop() -> void:
 	await turn_manager.run_game()
+	await game_ui.game_over_acknowledged
 
 	# Notify campaign controller on game end
 	if campaign_mode and game_over_callback.is_valid():

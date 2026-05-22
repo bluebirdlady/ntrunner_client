@@ -13,7 +13,7 @@ var subroutines:    Array         = []   # Array[Dictionary] from AbilityRegistr
 var broken_indices: Array         = []   # Array[int] — broken subroutine indices
 
 # Per-icebreaker temporary strength boosts for this encounter.
-# Keys are card_id (String), values are int (temporary boost amount).
+# Keys are runtime_instance_id (String) so two copies of the same breaker are tracked independently.
 var temp_strength_boosts: Dictionary = {}
 
 # Reference to installed icebreakers available this encounter
@@ -44,7 +44,7 @@ func get_breaker_strength(breaker: InstalledCard) -> int:
 	var base: int = _resolve_breaker_base_strength(breaker)
 	# Permanent strength from power counters (e.g. Marjanah: +1 per ice passed)
 	var permanent: int = breaker.get_counter("power")
-	var boost: int = temp_strength_boosts.get(breaker.card_id, 0)
+	var boost: int = temp_strength_boosts.get(breaker.runtime_instance_id, 0)
 	var board_bonus: int = 0
 	if ctx != null and ctx.has_method("query_breaker_strength_bonus"):
 		board_bonus = ctx.query_breaker_strength_bonus()
@@ -68,8 +68,8 @@ func breaker_reaches(breaker: InstalledCard) -> bool:
 
 # Apply a temporary strength boost to a breaker
 func apply_boost(breaker: InstalledCard, amount: int) -> void:
-	var current: int = temp_strength_boosts.get(breaker.card_id, 0)
-	temp_strength_boosts[breaker.card_id] = current + amount
+	var current: int = temp_strength_boosts.get(breaker.runtime_instance_id, 0)
+	temp_strength_boosts[breaker.runtime_instance_id] = current + amount
 
 
 # ── Subroutine queries ────────────────────────────────────────────────────────

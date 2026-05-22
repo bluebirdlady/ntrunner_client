@@ -101,6 +101,15 @@ func _evaluate_condition(condition: Dictionary, ctx: GameContext) -> bool:
 			var inner: Dictionary = condition.get("condition", {}) as Dictionary
 			return not _evaluate_condition(inner, ctx)
 
+		"runner_made_successful_run":
+			return ctx.runner_made_successful_run_this_turn
+
+		"corp_discarded_last_turn":
+			return ctx.corp_discarded_to_hand_limit_last_turn
+
+		"corp_scored_agenda_this_turn":
+			return ctx.corp_last_scored_agenda_points > 0
+
 		_:
 			push_error("AbilityInterpreter: unknown condition type '%s'" % ctype)
 			return false
@@ -443,6 +452,20 @@ func _execute_effect(effect: Dictionary, ctx: GameContext, chosen_target: Varian
 		"choose_and_run":
 			# Ask the runner to choose a server from a list, then run it.
 			var allowed: Array = params.get("servers", ["hq", "rd", "archives"]) as Array
+			# Expand "remote" placeholder to actual live remote server IDs.
+			# abilities.json uses "remote" as shorthand; ctx only knows "remote_0" etc.
+			var expanded: Array = []
+			for srv_entry in allowed:
+				if srv_entry == "remote":
+					for remote_srv in ctx.get_remote_servers():
+						expanded.append((remote_srv as Server).server_id)
+				else:
+					expanded.append(srv_entry)
+			if not expanded.is_empty():
+				allowed = expanded
+			if allowed.is_empty():
+				push_error("AbilityInterpreter: choose_and_run — no valid servers available")
+				return
 			var chosen: String = allowed[0]
 			if ctx.runner_decision_maker != null and ctx.runner_decision_maker.has_method("choose_server"):
 				chosen = await ctx.runner_decision_maker.choose_server(allowed, ctx)
@@ -1112,21 +1135,184 @@ func _execute_effect(effect: Dictionary, ctx: GameContext, chosen_target: Varian
 				ctx.log("%s is trashed (end of run)." % self_card.display_name())
 
 		"self_trash":
-			# Unconditionally trash the owning card (Tranquilizer after derez, etc.)
+			# Unconditionally trash the owning card (Tranquilizer, Fermenter, Spin Doctor, etc.)
 			var iid: String = ctx.current_event_data.get("card_instance_id", "")
 			var self_card   := ctx.get_installed_card_by_instance_id(iid)
 			if self_card == null and iid != "":
 				self_card = ctx.get_installed_card_by_id(iid)
 			if self_card != null:
-				# Remove from host ice if hosted
 				if self_card.hosted_on_id != "":
+					# Hosted on ice (e.g. Tranquilizer)
 					var host_ice := ctx.get_ice_by_instance_id(self_card.hosted_on_id)
 					if host_ice != null:
 						host_ice.hosted_cards.erase(self_card)
+					if self_card.card_record != null:
+						ctx.runner_discard.append(self_card.card_record)
 				else:
-					ctx.runner_rig.erase(self_card)
+					# Check corp server roots first (e.g. Spin Doctor asset)
+					var found_in_server := false
+					for server in ctx.servers.values():
+						var s: Server = server as Server
+						if s.root.has(self_card):
+							s.remove_from_root(self_card)
+							ctx.remove_empty_remote_servers()
+							found_in_server = true
+							break
+					if found_in_server:
+						if self_card.card_record != null:
+							ctx.corp_discard.append(self_card.card_record)
+					else:
+						# Runner rig card (e.g. Fermenter)
+						ctx.runner_rig.erase(self_card)
+						if self_card.card_record != null:
+							ctx.runner_discard.append(self_card.card_record)
 				ctx.unregister_all_card_effects(iid)
 				ctx.log("%s is trashed." % self_card.display_name())
+
+		# ── Spin Doctor: shuffle cards from Archives into R&D ─────────────────
+
+		"shuffle_archives_to_rd":
+			var max_count: int = params.get("max_count", 2)
+			if ctx.corp_discard.is_empty():
+				ctx.log("Archives is empty — nothing to shuffle into R&D.")
+			else:
+				var dm: Object = ctx.corp_decision_maker
+				var chosen: Array = []
+				if dm != null and dm.has_method("choose_cards_from_archives"):
+					chosen = await dm.choose_cards_from_archives(ctx.corp_discard, max_count, ctx)
+				else:
+					var count: int = min(max_count, ctx.corp_discard.size())
+					for i in range(count):
+						chosen.append(ctx.corp_discard[i])
+				for card in chosen:
+					ctx.corp_discard.erase(card)
+					ctx.corp_deck.append(card)
+				ctx.corp_deck.shuffle()
+				ctx.log("Spin Doctor: shuffled %d card(s) from Archives into R&D." % chosen.size())
+
+		# ── Malapert Data Vault: peek top of R&D; add to HQ if agenda/operation ──
+
+		"malapert_top_rd_to_hq":
+			if ctx.corp_deck.is_empty():
+				ctx.log("Malapert Data Vault: R&D is empty.")
+			else:
+				var top_card: CardRecord = ctx.corp_deck[0] as CardRecord
+				if top_card == null:
+					pass
+				elif top_card.card_type in ["agenda", "operation"]:
+					# Corp always benefits from pulling an agenda or operation into hand.
+					# Default AI: always accept. A human chooser method can override.
+					var should_add := true
+					if ctx.corp_decision_maker != null and \
+							ctx.corp_decision_maker.has_method("choose_malapert_add_to_hq"):
+						should_add = await ctx.corp_decision_maker.choose_malapert_add_to_hq(top_card, ctx)
+					if should_add:
+						ctx.corp_deck.pop_front()
+						ctx.corp_hand.append({"card_id": top_card.id, "card_record": top_card})
+						ctx.log("Malapert Data Vault: %s (%s) moved from top of R&D to HQ." % [
+							top_card.title, top_card.card_type
+						])
+					else:
+						ctx.log("Malapert Data Vault: Corp declines to add %s to HQ." % top_card.title)
+				else:
+					ctx.log("Malapert Data Vault: Top of R&D is %s (%s) — not an agenda or operation." % [
+						top_card.title, top_card.card_type
+					])
+
+		# ── Precision Design: add 1 card from Archives to HQ ─────────────────
+
+		"fetch_from_archives_to_hq":
+			if ctx.corp_discard.is_empty():
+				ctx.log("Archives is empty — Precision Design has nothing to fetch.")
+			else:
+				var dm: Object = ctx.corp_decision_maker
+				var chosen_arch: CardRecord = null
+				if dm != null and dm.has_method("choose_from_archives"):
+					chosen_arch = await dm.choose_from_archives(ctx.corp_discard, ctx)
+				else:
+					chosen_arch = ctx.corp_discard[0] as CardRecord if not ctx.corp_discard.is_empty() else null
+				if chosen_arch != null:
+					ctx.corp_discard.erase(chosen_arch)
+					ctx.corp_hand.append({"card_id": chosen_arch.id, "card_record": chosen_arch})
+					ctx.log("Precision Design: %s adds %s from Archives to HQ." % [ctx.corp_name(), chosen_arch.title])
+
+		# ── Hansei Review: Corp discards a card from HQ ───────────────────────
+
+		"discard_from_corp_hand":
+			var amount: int = params.get("amount", 1)
+			var dm: Object = ctx.corp_decision_maker
+			for _i in range(min(amount, ctx.corp_hand.size())):
+				var chosen_entry: Variant = null
+				if dm != null and dm.has_method("choose_card_from_hand"):
+					chosen_entry = await dm.choose_card_from_hand(ctx.corp_hand, ctx)
+				else:
+					chosen_entry = ctx.corp_hand.back() if not ctx.corp_hand.is_empty() else null
+				if chosen_entry == null:
+					break
+				ctx.corp_hand.erase(chosen_entry)
+				var hq_record: CardRecord = (chosen_entry as Dictionary).get("card_record", null) as CardRecord
+				if hq_record != null:
+					ctx.corp_discard.append(hq_record)
+					ctx.corp_discard_facedown[hq_record.title] = true
+					ctx.log("%s discards %s from HQ." % [ctx.corp_name(), hq_record.title])
+
+		# ── Longevity Serum: shuffle discard into deck, gain 1cr per card ─────
+
+		"shuffle_discard_to_deck_gain_credits":
+			var subject: String = params.get("subject", "corp")
+			var s_discard: Array = ctx.corp_discard if subject == "corp" else ctx.runner_discard
+			var s_deck: Array    = ctx.corp_deck    if subject == "corp" else ctx.runner_deck
+			if s_discard.is_empty():
+				ctx.log("Discard pile is empty — nothing to shuffle.")
+			else:
+				var dm: Object = ctx.corp_decision_maker if subject == "corp" else ctx.runner_decision_maker
+				var chosen_cards: Array = []
+				if dm != null and dm.has_method("choose_cards_to_shuffle_into_deck"):
+					chosen_cards = await dm.choose_cards_to_shuffle_into_deck(s_discard.duplicate(), ctx)
+				else:
+					chosen_cards = s_discard.duplicate()
+				for card in chosen_cards:
+					s_discard.erase(card)
+					s_deck.append(card)
+				s_deck.shuffle()
+				var gained: int = chosen_cards.size()
+				if gained > 0:
+					ctx.set_credits(subject, ctx.get_credits(subject) + gained)
+					ctx.log("Longevity Serum: shuffled %d card(s) into R&D, gained %d cr." % [gained, gained])
+
+		# ── Neurospike: deal net damage equal to last scored agenda's points ────
+
+		"deal_damage_from_last_scored_agenda":
+			var damage_type: String = params.get("damage_type", "net")
+			var amount: int = ctx.corp_last_scored_agenda_points
+			if amount <= 0:
+				ctx.log("Neurospike: no agenda scored this turn — no damage.")
+			else:
+				ctx.log("Neurospike: deals %d %s damage." % [amount, damage_type])
+				_deal_damage(damage_type, amount, ctx)
+
+		# ── Weyland Built to Last: gain 2cr on first advance each turn ────────
+
+		"gain_credits_first_advance_this_turn":
+			if ctx.corp_gained_advance_credits_this_turn:
+				return
+			ctx.corp_gained_advance_credits_this_turn = true
+			var btl_amount: int = params.get("amount", 2)
+			ctx.corp_credits += btl_amount
+			ctx.log("Built to Last: %s gains %d cr (first advance this turn)." % [ctx.corp_name(), btl_amount])
+
+		# ── Zahya: gain 1cr per access beyond the first in HQ/Archives ────────
+
+		"gain_credits_per_access_beyond_first":
+			var allowed_servers: Array = params.get("servers", []) as Array
+			var breach_server_id: String = ctx.current_event_data.get("server_id", "")
+			if not allowed_servers.is_empty() and breach_server_id not in allowed_servers:
+				return
+			var total_accessed: int = ctx.current_event_data.get("access_count", 0)
+			var zahya_bonus: int = max(0, total_accessed - 1)
+			if zahya_bonus > 0:
+				ctx.runner_credits += zahya_bonus
+				ctx.log("Zahya: gains %d cr (%d accesses)." % [zahya_bonus, total_accessed])
 
 		_:
 			push_error("AbilityInterpreter: unknown effect type '%s'" % etype)

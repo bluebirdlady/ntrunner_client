@@ -17,7 +17,7 @@ var CARD_W: float
 var CARD_H: float
 
 var _art_rect:         TextureRect
-var _unrezzed_overlay: ColorRect
+var _unrezzed_overlay: TextureRect
 var _card_record:      CardRecord = null
 var _is_rezzed:        bool       = true
 var _hover_tween:        Tween      = null
@@ -29,6 +29,7 @@ var _original_screen_pos: Vector2   = Vector2.ZERO
 static var _rounded_corner_shader: Shader         = null
 static var _rounded_material:      ShaderMaterial = null
 static var _art_manager:           Node           = null
+static var _card_back_texture:     Texture2D      = preload("res://Assets/Art/corp_card_back.jpg")
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -141,23 +142,14 @@ func _build_ui() -> void:
 	_art_rect.material     = _rounded_material
 	add_child(_art_rect)
 
-	_unrezzed_overlay = ColorRect.new()
+	_unrezzed_overlay = TextureRect.new()
 	_unrezzed_overlay.set_anchors_preset(Control.PRESET_FULL_RECT)
-	_unrezzed_overlay.color    = Color(0.08, 0.08, 0.12, 0.92)
-	_unrezzed_overlay.visible  = false
-	_unrezzed_overlay.material = _rounded_material
+	_unrezzed_overlay.expand       = true
+	_unrezzed_overlay.stretch_mode = TextureRect.STRETCH_SCALE
+	_unrezzed_overlay.texture      = _card_back_texture
+	_unrezzed_overlay.visible      = false
+	_unrezzed_overlay.material     = _rounded_material
 	add_child(_unrezzed_overlay)
-
-	var unrezzed_label := Label.new()
-	unrezzed_label.text = "?"
-	unrezzed_label.add_theme_font_size_override("font_size", 32)
-	unrezzed_label.add_theme_color_override("font_color", Color(0.3, 0.3, 0.4, 1.0))
-	unrezzed_label.set_anchors_preset(Control.PRESET_CENTER)
-	unrezzed_label.offset_left = -16
-	unrezzed_label.offset_top  = -20
-	unrezzed_label.size        = Vector2(32, 40)
-	unrezzed_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_unrezzed_overlay.add_child(unrezzed_label)
 
 
 # ── Rounded corner shader ─────────────────────────────────────────────────────

@@ -183,6 +183,20 @@ func get_runner_identity_id() -> String:
 	return deck.get("identity", _campaign.get("runner_identity", ""))
 
 
+# Returns all unique card IDs the runner could legally draw from:
+# the starter deck plus every card unlockable across all missions.
+# This represents the format's full runner card pool — public information
+# the Corp AI can reason from without knowing the player's exact deck.
+func get_full_card_pool() -> Array:
+	var seen: Dictionary = {}
+	for card_id in _campaign.get("runner_starter_deck", []):
+		seen[card_id] = true
+	for mission in _campaign.get("missions", []):
+		for card_id in mission.get("unlocks_cards", []):
+			seen[card_id] = true
+	return seen.keys()
+
+
 # ── Fiction ───────────────────────────────────────────────────────────────────
 
 func get_fiction_text(fiction_id: String) -> String:

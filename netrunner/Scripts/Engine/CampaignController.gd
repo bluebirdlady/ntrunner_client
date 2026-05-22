@@ -46,7 +46,7 @@ func _show_menu() -> void:
 	_menu.visible = true
 
 
-func _on_mission_selected(mission_id: String) -> void:
+func _on_mission_selected(mission_id: String, ai_level_override: int) -> void:
 	_current_mission_id = mission_id
 	_menu.visible = false
 
@@ -58,20 +58,25 @@ func _on_mission_selected(mission_id: String) -> void:
 		_show_menu()
 		return
 
-	_launch_game(mission, opponent)
+	_launch_game(mission, opponent, ai_level_override)
 
 
-func _launch_game(mission: Dictionary, opponent: Dictionary) -> void:
+func _launch_game(mission: Dictionary, opponent: Dictionary, ai_level_override: int = -1) -> void:
 	_main = MainScene.instantiate()
 	add_child(_main)
 
 	# Configure from campaign data
-	_main.campaign_mode          = true
-	_main.campaign_runner_deck   = _state.get_runner_deck()
-	_main.campaign_runner_id     = _state.get_runner_identity_id()
-	_main.campaign_corp_deck     = opponent.get("deck", []) as Array
-	_main.campaign_corp_id       = opponent.get("identity", "")
-	_main.game_over_callback     = Callable(self, "_on_game_over")
+	_main.campaign_mode           = true
+	_main.campaign_runner_deck    = _state.get_runner_deck()
+	_main.campaign_runner_id      = _state.get_runner_identity_id()
+	_main.campaign_corp_deck      = opponent.get("deck", []) as Array
+	_main.campaign_corp_id        = opponent.get("identity", "")
+	# Use the player's chosen level for replays; fall back to mission default on first run.
+	_main.campaign_ai_level       = ai_level_override if ai_level_override >= 0 else mission.get("ai_level", 0) as int
+	# Full format pool (public info): starter + all unlockable cards.
+	# The AI uses this to build a prior — it does NOT see the player's deck.
+	_main.campaign_available_pool = _state.get_full_card_pool()
+	_main.game_over_callback      = Callable(self, "_on_game_over")
 
 	# Main initialises itself in _ready — we call its campaign setup after
 	await get_tree().process_frame

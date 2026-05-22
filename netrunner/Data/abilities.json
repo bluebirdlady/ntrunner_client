@@ -1167,11 +1167,214 @@
 			]
 		}
 	},
+	"spin_doctor": {
+		"on_rez": {
+			"effects": [
+				{
+					"type": "draw_cards",
+					"params": {
+						"subject": "corp",
+						"amount": 2
+					}
+				}
+			]
+		},
+		"click_action": {
+			"label": "Spin Doctor: [trash] Shuffle up to 2 cards from Archives into R&D",
+			"subject": "corp",
+			"effects": [
+				{
+					"type": "shuffle_archives_to_rd",
+					"params": {
+						"max_count": 2
+					}
+				},
+				{
+					"type": "self_trash"
+				}
+			]
+		}
+	},
+	"haas_bioroid_precision_design": {
+		"corp_scores_agenda": {
+			"effects": [
+				{
+					"type": "fetch_from_archives_to_hq"
+				}
+			]
+		}
+	},
+	"zahya_sadeghi_versatile_contractor": {
+		"breach_complete": {
+			"effects": [
+				{
+					"type": "gain_credits_per_access_beyond_first",
+					"params": {
+						"servers": ["hq", "archives"]
+					}
+				}
+			]
+		}
+	},
+	"t400_memory_diamond": {
+		"passive_modifiers": [
+			{
+				"type": "mu_bonus",
+				"value": 2,
+				"conditions": {}
+			},
+			{
+				"type": "link_bonus",
+				"value": 1,
+				"conditions": {}
+			}
+		]
+	},
+	"buzzsaw": {
+		"break": {
+			"subtype_restriction": "barrier",
+			"cost_per_sub": 1,
+			"subs_per_use": 1
+		},
+		"boost": {
+			"cost": 2,
+			"strength_gained": 3
+		}
+	},
+	"hansei_review": {
+		"on_play": {
+			"condition": {
+				"type": "runner_made_successful_run"
+			},
+			"effects": [
+				{
+					"type": "gain_credits",
+					"params": {
+						"subject": "runner",
+						"amount": 3
+					}
+				},
+				{
+					"type": "discard_from_corp_hand",
+					"params": {
+						"amount": 1
+					}
+				}
+			]
+		}
+	},
+	"longevity_serum": {
+		"on_play": {
+			"effects": [
+				{
+					"type": "shuffle_discard_to_deck_gain_credits",
+					"params": {
+						"subject": "corp"
+					}
+				}
+			]
+		}
+	},
+	"weyland_consortium_built_to_last": {
+		"on_advance": {
+			"effects": [
+				{
+					"type": "gain_credits_first_advance_this_turn",
+					"params": {
+						"amount": 2
+					}
+				}
+			]
+		}
+	},
+	"jinteki_replicating_perfection": {
+		"passive_modifiers": [
+			{
+				"type": "block_remote_runs_unless_ran_central"
+			}
+		]
+	},
+	"jinteki_restoring_humanity": {
+		"corp_turn_start": {
+			"condition": {
+				"type": "corp_discarded_last_turn"
+			},
+			"effects": [
+				{
+					"type": "draw_cards",
+					"params": {
+						"subject": "corp",
+						"amount": 1
+					}
+				}
+			]
+		}
+	},
 	"clearinghouse": {
 		"corp_turn_start": {
 			"effects": [
 				{
 					"type": "clearinghouse_activate"
+				}
+			]
+		}
+	},
+	"neurospike": {
+		"on_play": {
+			"condition": {
+				"type": "corp_scored_agenda_this_turn"
+			},
+			"effects": [
+				{
+					"type": "deal_damage_from_last_scored_agenda",
+					"params": {
+						"damage_type": "net"
+					}
+				}
+			]
+		}
+	},
+	"above_the_law": {
+		"on_score": {
+			"effects": [
+				{
+					"type": "give_tags",
+					"params": {
+						"amount": 1
+					}
+				}
+			]
+		}
+	},
+	"ballista": {
+		"subroutines": [
+			{
+				"label": "Trash 1 installed program.",
+				"effects": [
+					{
+						"type": "trash_runner_installed",
+						"params": {
+							"card_types": ["program"],
+							"subtypes": []
+						}
+					}
+				]
+			},
+			{
+				"label": "End the run.",
+				"effects": [
+					{
+						"type": "end_run"
+					}
+				]
+			}
+		]
+	},
+	"malapert_data_vault": {
+		"corp_scores_agenda": {
+			"effects": [
+				{
+					"type": "malapert_top_rd_to_hq"
 				}
 			]
 		}

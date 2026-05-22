@@ -154,3 +154,11 @@ func choose_carnivore(card_record: CardRecord, _ctx: GameContext) -> bool:
 	if carnivore_proxy.is_valid():
 		return await carnivore_proxy.call(card_record)
 	return false
+
+
+var choose_access_target_proxy: Callable   # func(candidates: Array) -> Variant
+
+func choose_access_target(candidates: Array, _ctx: GameContext) -> Variant:
+	if choose_access_target_proxy.is_valid():
+		return await choose_access_target_proxy.call(candidates)
+	return candidates[0] if not candidates.is_empty() else null

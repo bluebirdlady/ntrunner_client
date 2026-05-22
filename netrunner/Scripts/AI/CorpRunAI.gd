@@ -92,17 +92,19 @@ func _ice_is_worth_rezzing(card: InstalledCard) -> bool:
 
 
 func _runner_can_trivially_break(card: InstalledCard, ctx: GameContext) -> bool:
-	# Check if the runner has a breaker matching this ice's subtype installed.
-	# "Trivially" means: has the right breaker type.
-	# We don't model credit costs for breaking yet — that's a future enhancement.
-	var record: CardRecord = card.card_record
+	# AI breakers (e.g. Mayfly) can interact with any ice type regardless of subtype.
+	for rig_card in ctx.runner_rig:
+		var rc: InstalledCard = rig_card as InstalledCard
+		if rc.card_record != null and rc.card_record.has_subtype("ai"):
+			return true
 
+	# Standard subtype matching: fracter/barrier, killer/sentry, decoder/code_gate.
+	var record: CardRecord = card.card_record
 	var breaker_for_subtype := {
 		"barrier":   "fracter",
 		"sentry":    "killer",
 		"code_gate": "decoder",
 	}
-
 	for subtype in record.subtypes:
 		var needed_breaker: String = breaker_for_subtype.get(subtype, "")
 		if needed_breaker == "":
