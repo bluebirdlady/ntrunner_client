@@ -48,7 +48,31 @@ func _load_save() -> void:
 			migrated[card_id] = 3
 		_save["unlocked_cards"] = migrated
 		persist()
-	
+	# Migrate saves that pre-date identity-as-card: ensure starter identity is present
+	var starter_id: String = _campaign.get("runner_identity", "")
+	if starter_id != "" and not (_save.get("unlocked_cards", {}) as Dictionary).has(starter_id):
+		unlock_card(starter_id, 1)
+		persist()
+	# Retroactively grant any cards added to already-completed missions after the save
+	# was created.  This is the only way existing saves can receive new unlocks, since
+	# complete_mission() is not re-called on replay and there is no in-game save reset.
+	var _completed_ids: Array = _save.get("completed_missions", [])
+	var _gained_new := false
+	for _mission_def in _campaign.get("missions", []):
+		var _mid: String = (_mission_def as Dictionary).get("id", "")
+		if _mid not in _completed_ids:
+			continue
+		for _unlock in (_mission_def as Dictionary).get("unlocks_cards", []):
+			var _uid: String = _unlock if _unlock is String else (_unlock as Dictionary).get("id", "")
+			var _award: int  = 1 if _unlock is String else (_unlock as Dictionary).get("count", 1) as int
+			if _uid == "":
+				continue
+			var _current: int = int((_save.get("unlocked_cards", {}) as Dictionary).get(_uid, 0))
+			if _current < _award:
+				unlock_card(_uid, _award - _current)
+				_gained_new = true
+	if _gained_new:
+		persist()
 
 
 func _fresh_save() -> Dictionary:
@@ -61,6 +85,10 @@ func _fresh_save() -> Dictionary:
 	# Cap at 3 per card
 	for k in starter_unlocks:
 		starter_unlocks[k] = min(starter_unlocks[k], 3)
+	# Starter identity is an unlocked card like any other — seed 1 copy
+	var starter_identity: String = _campaign.get("runner_identity", "")
+	if starter_identity != "":
+		starter_unlocks[starter_identity] = 1
 
 	return {
 		"completed_missions": [],
@@ -237,3 +265,34 @@ func campaign_title() -> String:
 
 func campaign_subtitle() -> String:
 	return _campaign.get("subtitle", "")
+
+
+# ── Named deck saves ──────────────────────────────────────────────────────────
+# Stored in the save file as "saved_decks": [{name, identity, cards}, ...]
+
+func get_saved_decks() -> Array:
+	return _save.get("saved_decks", [])
+
+
+# Save (or overwrite) a named build.  Names are the unique key.
+func save_named_deck(name: String, identity_id: String, cards: Dictionary) -> void:
+	if name == "":
+		return
+	var decks: Array = _save.get("saved_decks", [])
+	var entry := {"name": name, "identity": identity_id, "cards": cards}
+	for i in range(decks.size()):
+		if (decks[i] as Dictionary).get("name", "") == name:
+			decks[i] = entry
+			_save["saved_decks"] = decks
+			persist()
+			return
+	decks.append(entry)
+	_save["saved_decks"] = decks
+	persist()
+
+
+func delete_named_deck(name: String) -> void:
+	var decks: Array = _save.get("saved_decks", [])
+	decks = decks.filter(func(d): return (d as Dictionary).get("name", "") != name)
+	_save["saved_decks"] = decks
+	persist()

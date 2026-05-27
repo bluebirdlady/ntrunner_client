@@ -9,8 +9,12 @@ extends CanvasLayer
 signal deck_saved(identity_id: String, cards: Dictionary)
 signal cancelled
 
-const MIN_DECK_SIZE := 30
-const MAX_COPIES    := 3
+# Inner class used by the Save Build dialog to avoid while-loop coroutine capture issues.
+class _Dialog extends RefCounted:
+	signal submitted(name: String)
+
+const FALLBACK_MIN_DECK := 30
+const FALLBACK_MAX_COPIES := 3
 
 const COLOR_BG      := Color(0.04, 0.05, 0.07)
 const COLOR_PANEL   := Color(0.07, 0.09, 0.11)
@@ -22,7 +26,8 @@ const COLOR_DISABLED:= Color(0.25, 0.28, 0.25)
 
 var _state:         CampaignState
 var _identity:      CardRecord = null
-var _card_pool:     Array = []   # Array[CardRecord] all unlocked cards
+var _card_pool:     Array = []   # Array[CardRecord] all unlocked non-identity cards
+var _identity_records: Array = []   # Array[CardRecord] unlocked identity cards
 var _pool_counts:   Dictionary = {}   # card_id → max owned
 var _deck_cards:    Dictionary = {}   # card_id → count in deck
 var _filtered:      Array = []   # current filtered view
@@ -33,12 +38,15 @@ var _filter_faction: String = ""    # "" = all
 var _search_text:    String = ""
 
 # UI nodes
-var _collection_grid: GridContainer
-var _deck_list:        VBoxContainer
-var _stats_label:      Label
-var _search_field:     LineEdit
-var _save_btn:         Button
-var _influence_label:  Label
+var _collection_grid:      GridContainer
+var _identity_section:     VBoxContainer   # lives above the collection scroll
+var _deck_list:            VBoxContainer
+var _deck_title_label:     Label
+var _stats_label:          Label
+var _search_field:         LineEdit
+var _save_btn:             Button
+var _influence_label:      Label
+var _saved_decks_container: VBoxContainer  # list of named builds in the right panel
 
 
 func _ready() -> void:
@@ -48,29 +56,41 @@ func _ready() -> void:
 
 func setup(state: CampaignState) -> void:
 	_state = state
-	_identity = CardRegistry.get_card(state.get_runner_identity_id())
 	_pool_counts = state.get_unlocked_card_pool()
 
 	# Load current deck
 	var deck_data := state.get_current_deck()
 	_deck_cards = deck_data.get("cards", {}).duplicate() as Dictionary
 
-	# Build card objects from pool
+	# Separate pool into identities and regular cards
+	_identity_records = []
 	_card_pool = []
 	for card_id in _pool_counts:
 		var record: CardRecord = CardRegistry.get_card(card_id)
-		if record != null and not record.is_identity():
+		if record == null:
+			continue
+		if record.is_identity():
+			_identity_records.append(record)
+		else:
 			_card_pool.append(record)
 
-	# Sort: type → title
+	# Sort identities alphabetically; regular cards by type → title
+	_identity_records.sort_custom(func(a: CardRecord, b: CardRecord): return a.title < b.title)
 	_card_pool.sort_custom(func(a: CardRecord, b: CardRecord):
 		if a.card_type != b.card_type:
 			return a.card_type < b.card_type
 		return a.title < b.title
 	)
 
+	# Set active identity to the saved deck's choice (or first available)
+	var saved_identity_id: String = state.get_runner_identity_id()
+	_identity = CardRegistry.get_card(saved_identity_id)
+	if _identity == null and not _identity_records.is_empty():
+		_identity = _identity_records[0]
+
 	_apply_filters()
 	_refresh_stats()
+	_rebuild_saved_decks_panel()
 
 
 # ── Filtering ─────────────────────────────────────────────────────────────────
@@ -85,6 +105,7 @@ func _apply_filters() -> void:
 			return false
 		return true
 	)
+	_rebuild_identity_section()
 	_rebuild_collection_grid()
 
 
@@ -112,6 +133,12 @@ func _influence_used() -> int:
 	return used
 
 
+func _min_deck_size() -> int:
+	if _identity != null and _identity.minimum_deck_size > 0:
+		return _identity.minimum_deck_size
+	return FALLBACK_MIN_DECK
+
+
 func _influence_limit() -> int:
 	if _identity == null:
 		return 15
@@ -119,23 +146,21 @@ func _influence_limit() -> int:
 
 
 func _is_deck_legal() -> bool:
-	return _deck_size() >= MIN_DECK_SIZE and _influence_used() <= _influence_limit()
+	return _deck_size() >= _min_deck_size() and _influence_used() <= _influence_limit()
 
 
 func _refresh_stats() -> void:
 	var size   := _deck_size()
+	var min_sz := _min_deck_size()
 	var inf_u  := _influence_used()
 	var inf_l  := _influence_limit()
 	var legal  := _is_deck_legal()
 
-	var size_color := COLOR_ACCENT if size >= MIN_DECK_SIZE else COLOR_WARN
-	var inf_color  := COLOR_ACCENT if inf_u <= inf_l else COLOR_WARN
+	var inf_color := COLOR_ACCENT if inf_u <= inf_l else COLOR_WARN
 
-	_stats_label.text = (
-		"Cards: %d / %d min" % [size, MIN_DECK_SIZE]
-	)
+	_stats_label.text = "Cards: %d / %d min" % [size, min_sz]
 	_stats_label.add_theme_color_override("font_color",
-		COLOR_ACCENT if size >= MIN_DECK_SIZE else COLOR_WARN)
+		COLOR_ACCENT if size >= min_sz else COLOR_WARN)
 
 	_influence_label.text = "Influence: %d / %d" % [inf_u, inf_l]
 	_influence_label.add_theme_color_override("font_color", inf_color)
@@ -165,27 +190,32 @@ func _build_ui() -> void:
 	# Header
 	var header := _build_header()
 	header.set_anchors_preset(Control.PRESET_TOP_WIDE)
-	header.custom_minimum_size = Vector2(0, 72)
-	header.offset_bottom = 72
+	header.custom_minimum_size = Vector2(0, 52)
+	header.offset_bottom = 52
 	root.add_child(header)
 
 	# Main layout: collection (left) + deck (right)
 	var main_hbox := HBoxContainer.new()
 	main_hbox.set_anchors_preset(Control.PRESET_FULL_RECT)
-	main_hbox.offset_top    = 80
+	main_hbox.offset_top    = 60
 	main_hbox.offset_left   = 12
 	main_hbox.offset_right  = -12
 	main_hbox.offset_bottom = -12
 	main_hbox.add_theme_constant_override("separation", 12)
 	root.add_child(main_hbox)
 
-	# Left: filter bar + collection grid
+	# Left: filter bar + identity section + collection grid
 	var left_vbox := VBoxContainer.new()
 	left_vbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	left_vbox.add_theme_constant_override("separation", 6)
 	main_hbox.add_child(left_vbox)
 
 	left_vbox.add_child(_build_filter_bar())
+
+	# Identity cards live here — rebuilt by _rebuild_identity_section()
+	_identity_section = VBoxContainer.new()
+	_identity_section.add_theme_constant_override("separation", 4)
+	left_vbox.add_child(_identity_section)
 
 	var collection_scroll := ScrollContainer.new()
 	collection_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
@@ -207,11 +237,26 @@ func _build_ui() -> void:
 	right_vbox.add_theme_constant_override("separation", 6)
 	right_panel.add_child(right_vbox)
 
-	var deck_header := Label.new()
-	deck_header.text = "// YOUR DECK //"
-	deck_header.add_theme_font_size_override("font_size", 12)
-	deck_header.add_theme_color_override("font_color", Color(0.3, 0.6, 0.35))
-	right_vbox.add_child(deck_header)
+	var deck_hdr_row := HBoxContainer.new()
+	right_vbox.add_child(deck_hdr_row)
+
+	_deck_title_label = Label.new()
+	_deck_title_label.text = "// YOUR DECK //"
+	_deck_title_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_deck_title_label.add_theme_font_size_override("font_size", 12)
+	_deck_title_label.add_theme_color_override("font_color", Color(0.3, 0.6, 0.35))
+	deck_hdr_row.add_child(_deck_title_label)
+
+	var clear_btn := Button.new()
+	clear_btn.text = "✕ Clear"
+	clear_btn.add_theme_font_size_override("font_size", 10)
+	clear_btn.add_theme_color_override("font_color", COLOR_WARN)
+	clear_btn.pressed.connect(func():
+		_deck_cards.clear()
+		_apply_filters()
+		_refresh_stats()
+	)
+	deck_hdr_row.add_child(clear_btn)
 
 	# Stats row
 	var stats_row := HBoxContainer.new()
@@ -258,6 +303,38 @@ func _build_ui() -> void:
 	_save_btn.pressed.connect(_on_save_pressed)
 	btn_row.add_child(_save_btn)
 
+	# ── Saved builds section ──────────────────────────────────────────────────
+	var builds_sep := HSeparator.new()
+	builds_sep.add_theme_color_override("separation_color", COLOR_BORDER)
+	right_vbox.add_child(builds_sep)
+
+	var builds_hdr_row := HBoxContainer.new()
+	right_vbox.add_child(builds_hdr_row)
+
+	var builds_lbl := Label.new()
+	builds_lbl.text = "SAVED BUILDS"
+	builds_lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	builds_lbl.add_theme_font_size_override("font_size", 9)
+	builds_lbl.add_theme_color_override("font_color", Color(0.3, 0.55, 0.35))
+	builds_hdr_row.add_child(builds_lbl)
+
+	var save_build_btn := Button.new()
+	save_build_btn.text = "💾  Save Build"
+	save_build_btn.add_theme_font_size_override("font_size", 10)
+	save_build_btn.pressed.connect(_start_save_build_dialog)
+	builds_hdr_row.add_child(save_build_btn)
+
+	var builds_scroll := ScrollContainer.new()
+	builds_scroll.custom_minimum_size = Vector2(0, 110)
+	builds_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	builds_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	right_vbox.add_child(builds_scroll)
+
+	_saved_decks_container = VBoxContainer.new()
+	_saved_decks_container.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_saved_decks_container.add_theme_constant_override("separation", 4)
+	builds_scroll.add_child(_saved_decks_container)
+
 
 func _build_header() -> PanelContainer:
 	var panel := PanelContainer.new()
@@ -270,23 +347,11 @@ func _build_header() -> PanelContainer:
 	style.content_margin_bottom = 10
 	panel.add_theme_stylebox_override("panel", style)
 
-	var hbox := HBoxContainer.new()
-	panel.add_child(hbox)
-
 	var title := Label.new()
 	title.text = "// DECK BUILDER"
 	title.add_theme_font_size_override("font_size", 22)
 	title.add_theme_color_override("font_color", COLOR_ACCENT)
-	title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	hbox.add_child(title)
-
-	var identity_label := Label.new()
-	identity_label.text = "IDENTITY: %s" % (
-		_identity.title if _identity != null else "Unknown"
-	)
-	identity_label.add_theme_font_size_override("font_size", 11)
-	identity_label.add_theme_color_override("font_color", Color(0.4, 0.6, 0.45))
-	hbox.add_child(identity_label)
+	panel.add_child(title)
 
 	return panel
 
@@ -308,8 +373,8 @@ func _build_filter_bar() -> HBoxContainer:
 	# Type filter
 	var type_opts := OptionButton.new()
 	type_opts.custom_minimum_size = Vector2(120, 0)
-	for pair in [["All Types", ""], ["Event", "event"], ["Program", "program"],
-				 ["Hardware", "hardware"], ["Resource", "resource"]]:
+	for pair in [["All Types", ""], ["Identity", "identity"], ["Event", "event"],
+				 ["Program", "program"], ["Hardware", "hardware"], ["Resource", "resource"]]:
 		type_opts.add_item(pair[0])
 		type_opts.set_item_metadata(type_opts.item_count - 1, pair[1])
 	type_opts.item_selected.connect(func(idx: int):
@@ -348,11 +413,83 @@ func _build_filter_bar() -> HBoxContainer:
 	return hbox
 
 
+# ── Identity section ──────────────────────────────────────────────────────────
+
+func _rebuild_identity_section() -> void:
+	if _identity_section == null:
+		return
+	for child in _identity_section.get_children():
+		child.queue_free()
+
+	# Hide when the player has narrowed to a specific non-identity type
+	var show: bool = _filter_type == "" or _filter_type == "identity"
+	_identity_section.visible = show
+	if not show or _identity_records.is_empty():
+		return
+
+	# Apply search text to identities too
+	var visible_ids: Array = _identity_records.filter(func(r: CardRecord):
+		return _search_text == "" or r.title.to_lower().contains(_search_text.to_lower())
+	)
+	if visible_ids.is_empty():
+		return
+
+	var hdr := Label.new()
+	hdr.text = "IDENTITY"
+	hdr.add_theme_font_size_override("font_size", 9)
+	hdr.add_theme_color_override("font_color", Color(0.3, 0.55, 0.35))
+	_identity_section.add_child(hdr)
+
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 8)
+	_identity_section.add_child(row)
+
+	for record in visible_ids:
+		row.add_child(_make_identity_card(record))
+
+	var sep := HSeparator.new()
+	sep.add_theme_color_override("separation_color", COLOR_BORDER)
+	_identity_section.add_child(sep)
+
+
+func _make_identity_card(record: CardRecord) -> Control:
+	var container := VBoxContainer.new()
+	container.add_theme_constant_override("separation", 2)
+	container.custom_minimum_size = Vector2(130, 0)
+
+	var card_view := CardView.new()
+	container.add_child(card_view)
+	card_view.setup(record, true)
+
+	var is_active: bool = _identity != null and _identity.id == record.id
+
+	var select_btn := Button.new()
+	select_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	if is_active:
+		select_btn.text = "◈  ACTIVE"
+		select_btn.disabled = true
+		select_btn.add_theme_color_override("font_color", COLOR_ACCENT)
+	else:
+		select_btn.text = "▶  SELECT"
+		select_btn.pressed.connect(func():
+			_identity = record
+			_rebuild_identity_section()
+			_refresh_stats()
+		)
+	container.add_child(select_btn)
+
+	return container
+
+
 # ── Collection grid ───────────────────────────────────────────────────────────
 
 func _rebuild_collection_grid() -> void:
 	for child in _collection_grid.get_children():
 		child.queue_free()
+
+	# When filtering to "identity" only, the regular card grid is empty — that's fine.
+	if _filter_type == "identity":
+		return
 
 	for record in _filtered:
 		_collection_grid.add_child(_make_collection_card(record))
@@ -376,6 +513,8 @@ func _make_collection_card(record: CardRecord) -> Control:
 
 	var in_deck: int   = int(_deck_cards.get(record.id, 0))
 	var max_own: int   = int(_pool_counts.get(record.id, 0))
+	var copy_cap: int  = record.deck_limit if record.deck_limit > 0 else FALLBACK_MAX_COPIES
+	var effective_max: int = min(max_own, copy_cap)
 	var inf_cost: int  = record.influence_cost
 	var is_faction: bool = _identity != null and record.faction == _identity.faction
 
@@ -387,7 +526,7 @@ func _make_collection_card(record: CardRecord) -> Control:
 	count_row.add_child(minus_btn)
 
 	var count_label := Label.new()
-	count_label.text = "%d/%d" % [in_deck, max_own]
+	count_label.text = "%d/%d" % [in_deck, effective_max]
 	count_label.custom_minimum_size = Vector2(36, 0)
 	count_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	count_label.add_theme_font_size_override("font_size", 11)
@@ -398,7 +537,7 @@ func _make_collection_card(record: CardRecord) -> Control:
 	var plus_btn := Button.new()
 	plus_btn.text = "+"
 	plus_btn.custom_minimum_size = Vector2(28, 0)
-	plus_btn.disabled = in_deck >= max_own
+	plus_btn.disabled = in_deck >= effective_max
 	plus_btn.pressed.connect(func(): _change_count(record.id, +1))
 	count_row.add_child(plus_btn)
 
@@ -419,6 +558,41 @@ func _make_collection_card(record: CardRecord) -> Control:
 func _rebuild_deck_list() -> void:
 	for child in _deck_list.get_children():
 		child.queue_free()
+
+	# Update deck panel title to reflect chosen identity
+	if _deck_title_label != null:
+		var id_name: String = _identity.title.to_upper() if _identity != null else "YOUR DECK"
+		_deck_title_label.text = "// %s //" % id_name
+
+	# Identity row at the top of the deck list
+	if _identity != null:
+		var id_hdr := Label.new()
+		id_hdr.text = "IDENTITY"
+		id_hdr.add_theme_font_size_override("font_size", 9)
+		id_hdr.add_theme_color_override("font_color", Color(0.3, 0.55, 0.35))
+		_deck_list.add_child(id_hdr)
+
+		var id_row := HBoxContainer.new()
+		id_row.add_theme_constant_override("separation", 6)
+
+		var id_icon := Label.new()
+		id_icon.text = "◈"
+		id_icon.add_theme_font_size_override("font_size", 12)
+		id_icon.add_theme_color_override("font_color", COLOR_ACCENT)
+		id_row.add_child(id_icon)
+
+		var id_name_lbl := Label.new()
+		id_name_lbl.text = _identity.title
+		id_name_lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		id_name_lbl.add_theme_font_size_override("font_size", 11)
+		id_name_lbl.add_theme_color_override("font_color", COLOR_ACCENT)
+		id_row.add_child(id_name_lbl)
+
+		_deck_list.add_child(id_row)
+
+		var id_sep := HSeparator.new()
+		id_sep.add_theme_color_override("separation_color", COLOR_BORDER)
+		_deck_list.add_child(id_sep)
 
 	# Group by card type
 	var by_type: Dictionary = {}
@@ -493,9 +667,11 @@ func _make_deck_entry(record: CardRecord, count: int) -> HBoxContainer:
 # ── Card count changes ────────────────────────────────────────────────────────
 
 func _change_count(card_id: String, delta: int) -> void:
-	var current: int = int(_deck_cards.get(card_id, 0))
-	var max_own: int = int(_pool_counts.get(card_id, 0))
-	var new_count: int = clamp(current + delta, 0, min(max_own, MAX_COPIES))
+	var current: int  = int(_deck_cards.get(card_id, 0))
+	var max_own: int  = int(_pool_counts.get(card_id, 0))
+	var record: CardRecord = CardRegistry.get_card(card_id)
+	var copy_cap: int = record.deck_limit if record != null and record.deck_limit > 0 else FALLBACK_MAX_COPIES
+	var new_count: int = clamp(current + delta, 0, min(max_own, copy_cap))
 
 	if new_count == 0:
 		_deck_cards.erase(card_id)
@@ -506,13 +682,191 @@ func _change_count(card_id: String, delta: int) -> void:
 	_refresh_stats()
 
 
-# ── Save ──────────────────────────────────────────────────────────────────────
+# ── Save / load current deck ──────────────────────────────────────────────────
 
 func _on_save_pressed() -> void:
-	var identity_id: String = _state.get_runner_identity_id()
+	var identity_id: String = _identity.id if _identity != null else _state.get_runner_identity_id()
 	_state.save_deck(identity_id, _deck_cards)
 	deck_saved.emit(identity_id, _deck_cards)
 	queue_free()
+
+
+# ── Named build save / load / delete ─────────────────────────────────────────
+
+func _rebuild_saved_decks_panel() -> void:
+	if _saved_decks_container == null or _state == null:
+		return
+	for child in _saved_decks_container.get_children():
+		child.queue_free()
+
+	var decks: Array = _state.get_saved_decks()
+	if decks.is_empty():
+		var empty_lbl := Label.new()
+		empty_lbl.text = "No saved builds yet."
+		empty_lbl.add_theme_font_size_override("font_size", 10)
+		empty_lbl.add_theme_color_override("font_color", Color(0.35, 0.38, 0.38))
+		_saved_decks_container.add_child(empty_lbl)
+		return
+
+	for deck_data in decks:
+		_saved_decks_container.add_child(_make_saved_deck_entry(deck_data as Dictionary))
+
+
+func _make_saved_deck_entry(deck_data: Dictionary) -> HBoxContainer:
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 4)
+
+	var name_lbl := Label.new()
+	name_lbl.text = deck_data.get("name", "Unnamed")
+	name_lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	name_lbl.add_theme_font_size_override("font_size", 10)
+	name_lbl.add_theme_color_override("font_color", Color(0.78, 0.88, 0.80))
+	name_lbl.clip_text = true
+	row.add_child(name_lbl)
+
+	# Total card count
+	var saved_cards: Dictionary = deck_data.get("cards", {}) as Dictionary
+	var card_total := 0
+	for c in saved_cards.values():
+		card_total += int(c)
+	var count_lbl := Label.new()
+	count_lbl.text = "%d" % card_total
+	count_lbl.add_theme_font_size_override("font_size", 10)
+	count_lbl.add_theme_color_override("font_color", Color(0.45, 0.5, 0.45))
+	row.add_child(count_lbl)
+
+	var load_btn := Button.new()
+	load_btn.text = "Load"
+	load_btn.add_theme_font_size_override("font_size", 10)
+	load_btn.pressed.connect(func(): _load_named_deck(deck_data))
+	row.add_child(load_btn)
+
+	var del_btn := Button.new()
+	del_btn.text = "✕"
+	del_btn.add_theme_font_size_override("font_size", 10)
+	del_btn.add_theme_color_override("font_color", COLOR_WARN)
+	del_btn.pressed.connect(func():
+		_state.delete_named_deck(deck_data.get("name", ""))
+		_rebuild_saved_decks_panel()
+	)
+	row.add_child(del_btn)
+
+	return row
+
+
+func _load_named_deck(deck_data: Dictionary) -> void:
+	# Restore identity
+	var identity_id: String = deck_data.get("identity", "")
+	if identity_id != "":
+		var id_record: CardRecord = CardRegistry.get_card(identity_id)
+		if id_record != null:
+			_identity = id_record
+
+	# Restore cards, clamping to current pool and each card's deck limit
+	var saved_cards: Dictionary = deck_data.get("cards", {}) as Dictionary
+	_deck_cards = {}
+	for card_id in saved_cards:
+		var pool_count: int = int(_pool_counts.get(card_id, 0))
+		if pool_count <= 0:
+			continue   # card not unlocked in this save
+		var record: CardRecord = CardRegistry.get_card(card_id)
+		var copy_cap: int = record.deck_limit if record != null and record.deck_limit > 0 else FALLBACK_MAX_COPIES
+		var final_count: int = mini(int(saved_cards[card_id]), mini(pool_count, copy_cap))
+		if final_count > 0:
+			_deck_cards[card_id] = final_count
+
+	_apply_filters()
+	_refresh_stats()
+
+
+func _start_save_build_dialog() -> void:
+	var dlg := _Dialog.new()
+	dlg.submitted.connect(_on_save_build_dialog_closed, CONNECT_ONE_SHOT)
+	_open_save_build_dialog(dlg)
+
+
+func _open_save_build_dialog(dlg: _Dialog) -> void:
+	var backdrop := ColorRect.new()
+	backdrop.color = Color(0, 0, 0, 0.6)
+	backdrop.set_anchors_preset(Control.PRESET_FULL_RECT)
+	backdrop.mouse_filter = Control.MOUSE_FILTER_STOP
+	add_child(backdrop)
+
+	var panel := PanelContainer.new()
+	panel.set_anchors_preset(Control.PRESET_CENTER)
+	panel.custom_minimum_size = Vector2(320, 0)
+	var style := StyleBoxFlat.new()
+	style.bg_color = Color(0.07, 0.09, 0.12)
+	style.border_color = COLOR_BORDER
+	for side in [0, 1, 2, 3]:
+		style.set("border_width_%s" % ["top","right","bottom","left"][side], 1)
+	style.corner_radius_top_left     = 6
+	style.corner_radius_top_right    = 6
+	style.corner_radius_bottom_left  = 6
+	style.corner_radius_bottom_right = 6
+	style.content_margin_left   = 18
+	style.content_margin_right  = 18
+	style.content_margin_top    = 16
+	style.content_margin_bottom = 16
+	panel.add_theme_stylebox_override("panel", style)
+	backdrop.add_child(panel)
+
+	var vbox := VBoxContainer.new()
+	vbox.add_theme_constant_override("separation", 12)
+	panel.add_child(vbox)
+
+	var title_lbl := Label.new()
+	title_lbl.text = "Save Current Build"
+	title_lbl.add_theme_font_size_override("font_size", 13)
+	title_lbl.add_theme_color_override("font_color", COLOR_ACCENT)
+	vbox.add_child(title_lbl)
+
+	var name_field := LineEdit.new()
+	name_field.text = _identity.title if _identity != null else "My Build"
+	name_field.placeholder_text = "Build name..."
+	name_field.add_theme_font_size_override("font_size", 12)
+	vbox.add_child(name_field)
+
+	var btn_row := HBoxContainer.new()
+	btn_row.add_theme_constant_override("separation", 8)
+	vbox.add_child(btn_row)
+
+	var cancel_btn := Button.new()
+	cancel_btn.text = "Cancel"
+	cancel_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	btn_row.add_child(cancel_btn)
+
+	var confirm_btn := Button.new()
+	confirm_btn.text = "Save"
+	confirm_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	confirm_btn.add_theme_color_override("font_color", COLOR_ACCENT)
+	btn_row.add_child(confirm_btn)
+
+	# Emit signal directly — no lambda captures, no nested awaits.
+	cancel_btn.pressed.connect(func():
+		backdrop.queue_free()
+		dlg.submitted.emit("")
+	)
+	confirm_btn.pressed.connect(func():
+		var t: String = name_field.text.strip_edges()
+		backdrop.queue_free()
+		dlg.submitted.emit(t)
+	)
+	name_field.text_submitted.connect(func(t: String):
+		backdrop.queue_free()
+		dlg.submitted.emit(t.strip_edges())
+	)
+
+	name_field.call_deferred("grab_focus")
+	name_field.call_deferred("select_all")
+
+
+func _on_save_build_dialog_closed(name: String) -> void:
+	if name.strip_edges().is_empty():
+		return
+	var identity_id: String = _identity.id if _identity != null else ""
+	_state.save_named_deck(name.strip_edges(), identity_id, _deck_cards.duplicate())
+	_rebuild_saved_decks_panel()
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

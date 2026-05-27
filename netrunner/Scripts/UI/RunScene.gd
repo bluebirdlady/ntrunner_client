@@ -566,7 +566,7 @@ func show_encounter_prompt(encounter: EncounterState) -> Dictionary:
 	for i in range(encounter.subroutines.size()):
 		var sub: Dictionary = encounter.subroutines[i] as Dictionary
 		var broken_marker := "✓ " if encounter.is_broken(i) else "↳ "
-		var color := Color(0.4, 0.7, 0.4) if encounter.is_broken(i) else Color(0.8, 0.8, 0.8)
+		var color := Color(0.4, 0.7, 0.4) if encounter.is_broken(i) else Color(0.8, 0.2, 0.2)
 		var lbl := Label.new()
 		lbl.text = broken_marker + sub.get("label", "sub %d" % i)
 		lbl.add_theme_font_size_override("font_size", 10)
@@ -611,10 +611,16 @@ func show_encounter_prompt(encounter: EncounterState) -> Dictionary:
 				func(): encounter_action_resolved.emit({"type": "boost_strength", "card_id": b.card_id, "times": 1}),
 				Color(0.5, 0.7, 0.9))
 
-	# Leech hosted credits
+	# Encounter-spendable hosted credits (e.g. Leech).
+	# Only cards with "encounter_spend_credits": true in abilities.json are eligible.
+	# Cards like Telework Contract, Pennyshaver, and Smartware Distributor hold their
+	# credits for click actions or automatic payouts — they must NOT appear here.
 	for rig_card in ctx.runner_rig:
 		var rc: InstalledCard = rig_card as InstalledCard
 		if rc == null or rc.card_record == null:
+			continue
+		var card_def: Dictionary = ability_registry._abilities.get(rc.card_id, {}) as Dictionary
+		if not card_def.get("encounter_spend_credits", false):
 			continue
 		var hosted: int = rc.get_counter("credits")
 		if hosted > 0:
@@ -622,6 +628,35 @@ func show_encounter_prompt(encounter: EncounterState) -> Dictionary:
 			_add_btn("Spend 1¢ from %s  (%d remaining)" % [rc.display_name(), hosted],
 				func(): encounter_action_resolved.emit({"type": "spend_hosted_credits", "card_id": cid, "amount": 1}),
 				Color(0.9, 0.7, 0.3))
+
+	# Self-break ability (e.g. N-Pot: 3cr to break 1 sub, runner-only)
+	if encounter.ice_card != null and ability_registry != null:
+		var ice_def: Dictionary = ability_registry._abilities.get(encounter.ice_card.card_id, {}) as Dictionary
+		var self_break: Dictionary = ice_def.get("runner_self_break", {}) as Dictionary
+		if not self_break.is_empty():
+			var sb_cost: int = self_break.get("cost_per_sub", 0)
+			var has_unbroken := false
+			for i in range(encounter.subroutines.size()):
+				if not encounter.is_broken(i):
+					has_unbroken = true
+					break
+			if has_unbroken:
+				_add_section("SELF-BREAK (%dcr each):" % sb_cost)
+				for i in range(encounter.subroutines.size()):
+					if encounter.is_broken(i):
+						continue
+					var sub: Dictionary = encounter.subroutines[i] as Dictionary
+					var captured_i := i
+					var sb_btn := _add_btn(
+						"%dcr: Break \"%s\"" % [sb_cost, sub.get("label", "sub %d" % i)],
+						func(): encounter_action_resolved.emit({
+							"type": "break_self_sub",
+							"sub_index": captured_i,
+							"cost": sb_cost
+						}),
+						Color(0.4, 0.85, 1.0)
+					)
+					sb_btn.disabled = ctx.runner_credits < sb_cost
 
 	_add_section("─────────────────")
 	_add_btn("Pass — let subroutines fire",
@@ -650,10 +685,11 @@ func show_jack_out_prompt() -> bool:
 
 func show_trash_prompt(card: CardRecord) -> bool:
 	_clear_actions()
-	var cost := card.trash_cost if card else 0
+	var cost: int  = _compute_effective_trash_cost(card)
 	var title := card.title if card else "card"
+	var available: int = ctx.runner_trash_credits_available()
 	_add_section("Trash %s for %d¢?" % [title, cost])
-	_add_btn("Yes — Trash  (%d¢ available)" % ctx.runner_credits,
+	_add_btn("Yes — Trash  (%d¢ available)" % available,
 		func(): trash_resolved.emit(true),
 		Color(0.9, 0.4, 0.4))
 	_add_btn("No — Leave it",
@@ -662,6 +698,27 @@ func show_trash_prompt(card: CardRecord) -> bool:
 	var result: bool = await trash_resolved
 	_clear_actions()
 	return result
+
+
+# Effective trash cost = base + modifiers from rezzed cards in the same server (e.g. Mahkota +2).
+func _compute_effective_trash_cost(card: CardRecord) -> int:
+	var cost: int = card.trash_cost if card else 0
+	# Only apply server modifiers during an active run
+	if not ctx.run_active:
+		return cost
+	var server: Server = ctx.get_server(ctx.run_target_server)
+	if server == null or card == null or not card.is_asset():
+		return cost
+	if not ctx.has_meta("ability_registry"):
+		return cost
+	var ab_reg: AbilityRegistry = ctx.get_meta("ability_registry") as AbilityRegistry
+	for root_card in server.root:
+		var rc: InstalledCard = root_card as InstalledCard
+		if rc == null or not rc.is_rezzed:
+			continue
+		var rc_def: Dictionary = ab_reg._abilities.get(rc.card_id, {}) as Dictionary
+		cost += int(rc_def.get("trash_cost_increase_own_server_assets", 0))
+	return cost
 
 
 func show_payment_option_prompt(options: Array) -> Variant:

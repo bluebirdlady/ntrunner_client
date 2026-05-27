@@ -133,7 +133,8 @@ func project_corp_action(s: Dictionary, action: GameAction, _ctx: GameContext) -
 
 	match action.type:
 		"gain_credits":
-			ns["corp_credits"] = (s.get("corp_credits", 0) as int) + 3
+			# Corp gains exactly 1 credit per click — do not overestimate.
+			ns["corp_credits"] = (s.get("corp_credits", 0) as int) + 1
 
 		"draw_card":
 			ns["corp_hand"] = (s.get("corp_hand", 0) as int) + 1
@@ -143,21 +144,24 @@ func project_corp_action(s: Dictionary, action: GameAction, _ctx: GameContext) -
 			var card: CardRecord = action.params.get("card_record", null) as CardRecord
 			if card == null:
 				return ns
-			var cost: int = max(0, card.cost)
-			ns["corp_credits"] = max(0, (s.get("corp_credits", 0) as int) - cost)
-			ns["corp_hand"]    = max(0, (s.get("corp_hand",    0) as int) - 1)
-			if card.is_agenda():
-				var remotes_copy: Array = (ns.get("remotes", []) as Array).duplicate(true)
-				remotes_copy.append({
-					"server_id":  "projected",
-					"ice_count":  0,
-					"has_agenda": true,
-					"adv":        0,
-					"req":        card.advancement_requirement,
-				})
-				ns["remotes"] = remotes_copy
-			elif card.is_ice():
+			# Always costs 1 card from hand.
+			ns["corp_hand"] = max(0, (s.get("corp_hand", 0) as int) - 1)
+
+			if card.is_ice():
+				# Ice install cost = 1 credit per ice already on the target server.
+				# card.cost is the REZ cost, which has nothing to do with install cost.
 				var server_id: String = action.params.get("server_id", "") as String
+				var ice_install_cost: int = 0
+				match server_id:
+					"hq": ice_install_cost = s.get("hq_ice", 0) as int
+					"rd": ice_install_cost = s.get("rd_ice", 0) as int
+					_:
+						for remote in s.get("remotes", []) as Array:
+							if (remote as Dictionary).get("server_id", "") == server_id:
+								ice_install_cost = (remote as Dictionary).get("ice_count", 0) as int
+								break
+				ns["corp_credits"] = max(0, (s.get("corp_credits", 0) as int) - ice_install_cost)
+				# Update ice coverage
 				match server_id:
 					"hq": ns["hq_ice"] = (s.get("hq_ice", 0) as int) + 1
 					"rd": ns["rd_ice"] = (s.get("rd_ice", 0) as int) + 1
@@ -170,6 +174,28 @@ func project_corp_action(s: Dictionary, action: GameAction, _ctx: GameContext) -
 								remotes_copy[i] = r
 								break
 						ns["remotes"] = remotes_copy
+			elif card.is_agenda():
+				# Agendas install for free — card.cost is irrelevant here.
+				# If the Corp has ICE in hand it can protect the new remote next click,
+				# so project it with 1 layer of ice to avoid heavily penalising the
+				# install in the runner-response step.
+				var proj_ice := 0
+				if _ctx != null:
+					for hentry in _ctx.corp_hand:
+						var hc: CardRecord = (hentry as Dictionary).get("card_record", null) as CardRecord
+						if hc != null and hc.is_ice():
+							proj_ice = 1
+							break
+				var remotes_copy: Array = (ns.get("remotes", []) as Array).duplicate(true)
+				remotes_copy.append({
+					"server_id":  "projected",
+					"ice_count":  proj_ice,
+					"has_agenda": true,
+					"adv":        0,
+					"req":        card.advancement_requirement,
+				})
+				ns["remotes"] = remotes_copy
+			# Assets/upgrades also install for free — no credit deduction needed.
 
 		"advance":
 			ns["corp_credits"] = max(0, (s.get("corp_credits", 0) as int) - 1)
@@ -192,11 +218,34 @@ func project_corp_action(s: Dictionary, action: GameAction, _ctx: GameContext) -
 			if card == null:
 				return ns
 			var cost: int = max(0, card.cost)
+			# Deduct cost first, then apply the card's specific gain on top.
 			ns["corp_credits"] = max(0, (s.get("corp_credits", 0) as int) - cost)
 			ns["corp_hand"]    = max(0, (s.get("corp_hand",    0) as int) - 1)
-			# Approximate net gain for common economy operations
-			if card.id in ["hedge_fund", "government_subsidy"]:
-				ns["corp_credits"] = (s.get("corp_credits", 0) as int) + 5
+			match card.id:
+				"hedge_fund":
+					# Costs 5, gains 9 — net +4 on top of post-cost baseline
+					ns["corp_credits"] = (ns.get("corp_credits", 0) as int) + 9
+				"government_subsidy":
+					# Costs 3, gains 14 — net +11
+					ns["corp_credits"] = (ns.get("corp_credits", 0) as int) + 14
+				"predictive_planogram":
+					# Corp path: gain 3 credits (conservative; could also draw 3)
+					ns["corp_credits"] = (ns.get("corp_credits", 0) as int) + 3
+				"hansei_review":
+					# Corp draws 4, runner gains 2 credits
+					ns["corp_hand"]    = (ns.get("corp_hand",    0) as int) + 4
+					ns["runner_credits"] = (ns.get("runner_credits", 0) as int) + 2
+				"spin_doctor":
+					# Draw 2, shuffle 2 from Archives back to R&D
+					ns["corp_hand"] = (ns.get("corp_hand", 0) as int) + 2
+					ns["corp_deck"] = (ns.get("corp_deck", 0) as int) + 2
+				"neurospike":
+					# Deal corp_score net damage; clamp to runner grip
+					var dmg: int = max(1, ns.get("corp_score", 0) as int)
+					ns["runner_hand"] = max(0, (ns.get("runner_hand", 0) as int) - dmg)
+				_:
+					# Generic operation: approximate value as 2cr-equivalent
+					ns["corp_credits"] = (ns.get("corp_credits", 0) as int) + 2
 
 	return ns
 

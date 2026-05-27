@@ -20,7 +20,8 @@ extends RefCounted
 #   9. Gain credits (fallback)
 
 const ECONOMY_THRESHOLD := 6   # try to stay above this credit level
-const MIN_HAND_SIZE     := 3   # draw if hand drops below this
+const ECONOMY_CEILING   := 14  # don't gain credits beyond this — find something better to do
+const MIN_HAND_SIZE     := 4   # draw if hand drops below this
 
 var _run_ai: CorpRunAI
 var _ability_registry: AbilityRegistry
@@ -107,15 +108,39 @@ func choose_action(ctx: GameContext) -> GameAction:
 		if any_agenda != null:
 			return GameAction.advance(any_agenda.card_id)
 
-	# 8. Gain credits if below threshold
-	if ctx.corp_credits < ECONOMY_THRESHOLD:
-		return GameAction.gain_credits()
+	# 10. Advance any installed agenda even in an unprotected remote — don't
+	#     just sit on it forever waiting for ice that never comes.
+	if ctx.corp_credits >= 1:
+		var exposed_agenda := _find_any_installed_agenda_unprotected(ctx)
+		if exposed_agenda != null:
+			return GameAction.advance(exposed_agenda.card_id)
 
-	# 11. Draw if hand is small
+	# 11. Draw if hand is below threshold — prefer options over credits
 	if ctx.corp_hand.size() < MIN_HAND_SIZE and not ctx.corp_deck.is_empty():
 		return GameAction.draw_card()
 
-	# 12. Fallback: gain credits
+	# 12. Play an operation rather than clicking for 1 credit where possible.
+	#     Economy ops (Hedge Fund, Government Subsidy) are far more efficient.
+	#     Only skip if already at the economy ceiling (nothing left to buy).
+	if ctx.corp_credits < ECONOMY_CEILING:
+		var best_op := _find_best_operation(ctx)
+		if best_op != null:
+			return GameAction.play_operation(best_op)
+
+	# 13. Gain credits if below threshold
+	if ctx.corp_credits < ECONOMY_THRESHOLD:
+		return GameAction.gain_credits()
+
+	# 14. Draw as general fallback — cycle the deck to find something useful
+	#     rather than hoarding credits above the ceiling.
+	if not ctx.corp_deck.is_empty() and ctx.corp_hand.size() < 6:
+		return GameAction.draw_card()
+
+	# 15. Gain credits up to ceiling
+	if ctx.corp_credits < ECONOMY_CEILING:
+		return GameAction.gain_credits()
+
+	# 16. Hard fallback — truly nothing to do (stall click)
 	return GameAction.gain_credits()
 
 
@@ -157,9 +182,66 @@ func get_pre_click_rez_actions(ctx: GameContext) -> Array:
 			var c: InstalledCard = card as InstalledCard
 			if not c.is_rezzed and c.card_record != null:
 				var ctype: String = c.card_record.card_type
-				if (ctype == "asset" or ctype == "upgrade") and ctx.corp_credits >= max(0, c.card_record.cost):
+				if (ctype == "asset" or ctype == "upgrade") and ctx.corp_credits >= ctx.query_rez_cost(c):
 					actions.append(GameAction.rez_card(c.card_id, c.runtime_instance_id))
 	return actions
+
+
+# Corp chooses which scored agenda to forfeit (or null to decline for optional forfeits).
+# AI heuristic: forfeit the agenda worth the fewest points (minimise agenda point loss).
+func choose_sabotage_discard(ctx: GameContext) -> Dictionary:
+	# Called by AbilityInterpreter when the Runner's card triggers sabotage.
+	# Returns {"source": "hq", "card_record": cr} or {"source": "rd"}.
+	# Strategy: trash the cheapest non-agenda from HQ to avoid giving the Runner
+	# a stealable agenda in Archives; fall back to top of R&D otherwise.
+	var best_cr: CardRecord = null
+	var best_cost := 9999
+	for hand_entry in ctx.corp_hand:
+		var cr: CardRecord = hand_entry.get("card_record") as CardRecord
+		if cr == null or cr.card_type == "agenda":
+			continue
+		if cr.cost < best_cost:
+			best_cost = cr.cost
+			best_cr = cr
+	if best_cr != null:
+		return {"source": "hq", "card_record": best_cr}
+	if not ctx.corp_deck.is_empty():
+		return {"source": "rd"}
+	if not ctx.corp_hand.is_empty():
+		return {"source": "hq", "card_record": ctx.corp_hand[0].get("card_record") as CardRecord}
+	return {}
+
+
+func choose_forfeit_agenda(candidates: Array, _ctx: GameContext) -> InstalledCard:
+	if candidates.is_empty():
+		return null
+	var best: InstalledCard = candidates[0] as InstalledCard
+	for c in candidates:
+		var ic: InstalledCard = c as InstalledCard
+		if ic == null or ic.card_record == null:
+			continue
+		if best.card_record == null or ic.card_record.agenda_points < best.card_record.agenda_points:
+			best = ic
+	return best
+
+
+func choose_from_runner_score(candidates: Array, _ctx: GameContext) -> CardRecord:
+	# IP Enforcement: Corp takes the highest-value agenda from the Runner's score area.
+	# Maximises the point swing: Corp gains the most points while Runner loses the most.
+	if candidates.is_empty():
+		return null
+	var best: CardRecord = candidates[0] as CardRecord
+	for c in candidates:
+		var cr: CardRecord = c as CardRecord
+		if cr != null and cr.agenda_points > best.agenda_points:
+			best = cr
+	return best
+
+
+func choose_pay_shred_etr(_count: int, _ctx: GameContext) -> bool:
+	# Shred interrupt: Corp may trash 'count' random HQ cards to keep the ETR.
+	# AI always pays — ending the run is almost always worth the card loss.
+	return true
 
 
 func choose_window_action(ctx: GameContext, actor: String, can_rez_ice: bool) -> GameAction:
@@ -192,6 +274,25 @@ func choose_window_action(ctx: GameContext, actor: String, can_rez_ice: bool) ->
 				if _run_ai.choose_rez(c, ctx):
 					var iid: String = c.get("runtime_instance_id") if c.get("runtime_instance_id") != null else ""
 					return GameAction.rez_card(c.card_id, iid)
+
+	# Check for scored agenda paw_actions usable during any run window
+	# (e.g. Proprionegation: spend 1 agenda counter to move runner to outermost Archives).
+	for agenda_card in ctx.corp_score_area_cards:
+		var ag: InstalledCard = agenda_card as InstalledCard
+		if ag == null or ag.card_record == null:
+			continue
+		var ag_def: Dictionary = _ability_registry._abilities.get(ag.card_id, {}) as Dictionary
+		var paw_def: Variant   = ag_def.get("paw_action", null)
+		if paw_def == null:
+			continue
+		# Check conditions: needs agenda counter and run must be active (already true here)
+		if ag.get_counter("agenda") <= 0:
+			continue
+		# AI heuristic: only use Proprionegation when it would help (runner past all ice,
+		# Archives has ice that would stop the runner)
+		var archives_server: Server = ctx.get_server("archives")
+		if archives_server != null and archives_server.ice_count() > 0:
+			return GameAction.use_installed_card(ag.runtime_instance_id, ag.card_id)
 
 	return GameAction.pass_window()
 
@@ -292,10 +393,26 @@ func _find_asset_in_hand(ctx: GameContext) -> CardRecord:
 
 
 func _find_any_installed_agenda(ctx: GameContext) -> InstalledCard:
-	# Any agenda installed in a remote that has ice and hasn't met its requirement.
+	# Any agenda installed in a protected (iced) remote that hasn't met its requirement.
 	for server in ctx.servers.values():
 		var s: Server = server as Server
 		if not s.is_remote() or not s.has_ice():
+			continue
+		for card in s.root:
+			var c: InstalledCard = card as InstalledCard
+			if c.card_record == null or not c.card_record.is_agenda():
+				continue
+			if not c.meets_advancement_requirement():
+				return c
+	return null
+
+
+func _find_any_installed_agenda_unprotected(ctx: GameContext) -> InstalledCard:
+	# Fallback: any agenda installed in a remote WITHOUT ice that hasn't met its requirement.
+	# Used when no iced remote exists — better to advance the exposed agenda than do nothing.
+	for server in ctx.servers.values():
+		var s: Server = server as Server
+		if not s.is_remote() or s.has_ice():
 			continue
 		for card in s.root:
 			var c: InstalledCard = card as InstalledCard
@@ -324,15 +441,15 @@ func choose_modes(modes: Array, max_choices: int, ctx: GameContext) -> Array:
 		for i in range(modes.size()):
 			var label: String = (modes[i] as Dictionary).get("label", "").to_lower()
 			if deny_credits and "credit" in label:
-				ctx.log("[Wildcat Strike] Corp denies credits — Runner draws instead.")
+				ctx.send_log("[Wildcat Strike] Corp denies credits — Runner draws instead.")
 				return [i]
 			if deny_draw and "draw" in label:
-				ctx.log("[Wildcat Strike] Corp denies draws — Runner gains credits instead.")
+				ctx.send_log("[Wildcat Strike] Corp denies draws — Runner gains credits instead.")
 				return [i]
 		# Default: deny credits (economy denial)
 		for i in range(modes.size()):
 			if "credit" in (modes[i] as Dictionary).get("label", "").to_lower():
-				ctx.log("[Wildcat Strike] Corp denies credits by default.")
+				ctx.send_log("[Wildcat Strike] Corp denies credits by default.")
 				return [i]
 		return [0]
 
@@ -351,6 +468,45 @@ func choose_modes(modes: Array, max_choices: int, ctx: GameContext) -> Array:
 	if result.is_empty():
 		result.append(0)
 	return result
+
+
+func _find_playable_operations(ctx: GameContext) -> Array:
+	# Returns all operations in the Corp hand that are currently affordable.
+	var ops: Array = []
+	for entry in ctx.corp_hand:
+		var r: CardRecord = (entry as Dictionary).get("card_record", null) as CardRecord
+		if r == null or r.card_type != "operation":
+			continue
+		if ctx.corp_credits >= max(0, r.cost):
+			ops.append(r)
+	return ops
+
+
+func _find_best_operation(ctx: GameContext) -> CardRecord:
+	# Heuristic: prefer high-value economy operations; fall back to any playable op.
+	# Economy value is net-credit gain (gain - cost).  Non-economy ops are rated 0.
+	const ECONOMY_IDS := {
+		"government_subsidy": 11,   # gains 14, costs 3
+		"hedge_fund":          4,   # gains 9,  costs 5
+		"predictive_planogram": 3,  # gains 3 (corp path)
+		"hansei_review":        2,  # draw value approximated as 2cr-equivalent
+	}
+	var best_op: CardRecord   = null
+	var best_val: int         = -1
+	for entry in ctx.corp_hand:
+		var r: CardRecord = (entry as Dictionary).get("card_record", null) as CardRecord
+		if r == null or r.card_type != "operation":
+			continue
+		if ctx.corp_credits < max(0, r.cost):
+			continue
+		var val: int = ECONOMY_IDS.get(r.id, 0) as int
+		if val > best_val:
+			best_val = val
+			best_op  = r
+	# Only play zero-value ops (Neurospike, etc.) if we have nothing better to do.
+	if best_op != null and best_val >= 0:
+		return best_op
+	return null
 
 
 func _server_has_ice(ctx: GameContext, server_id: String) -> bool:
@@ -372,20 +528,36 @@ func _find_unrezzed_asset_or_upgrade(ctx: GameContext) -> InstalledCard:
 
 
 func _find_corp_click_action(ctx: GameContext) -> InstalledCard:
-	# Find a rezzed Corp installed card with a click_action and credits remaining
+	# Find a rezzed Corp installed card with a click_action and resources remaining.
 	for server in ctx.servers.values():
 		var s: Server = server as Server
 		for card in s.root:
 			var c: InstalledCard = card as InstalledCard
 			if not c.is_rezzed or c.card_record == null:
 				continue
-			# Check if it has a click_action defined
 			var card_def: Dictionary = _ability_registry._abilities.get(c.card_id, {}) as Dictionary
-			if not card_def.has("click_action"):
+			var click_def: Dictionary = card_def.get("click_action", {}) as Dictionary
+			if click_def.is_empty():
 				continue
-			# Only use if it has hosted credits to take
-			if c.get_counter("credits") > 0:
+			# One-shot abilities (e.g. Humanoid Resources): use whenever we have
+			# enough clicks — there are no counter resources to deplete.
+			if click_def.get("one_shot", false):
+				var needed: int = 1 + click_def.get("additional_cost_clicks", 0)
+				if ctx.corp_clicks >= needed:
+					return c
+			# Standard assets/upgrades: use if they have hosted credits
+			elif c.get_counter("credits") > 0:
 				return c
+	# Also check scored agendas — Dividends click actions spend "agenda" counters
+	for card in ctx.corp_score_area_cards:
+		var c: InstalledCard = card as InstalledCard
+		if c == null or c.card_record == null:
+			continue
+		var card_def: Dictionary = _ability_registry._abilities.get(c.card_id, {}) as Dictionary
+		if not card_def.has("click_action"):
+			continue
+		if c.get_counter("agenda") > 0:
+			return c
 	return null
 
 

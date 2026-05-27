@@ -124,9 +124,13 @@ func _update_all_displays() -> void:
 	var corp_pts_link   := "[url=score_corp][color=#aaffaa]%d pts[/color][/url]" % corp_pts
 	var runner_pts_link := "[url=score_runner][color=#aaffaa]%d pts[/color][/url]" % runner_pts
 	var mu_link := "[url=rig][color=#88ccff]%d/%d[/color][/url]" % [_ctx.runner_mu_used(), _ctx.runner_total_mu()]
+	# Show core damage indicator if runner has taken any core damage
+	var core_dmg_suffix := ""
+	if _ctx.runner_core_damage_taken > 0:
+		core_dmg_suffix = "  [color=#ff7777]♥%d[/color]" % _ctx.runner_max_hand_size()
 	resource_label.text = (
 		"[b]%s[/b]  %s%d  %s%d  %s%s\n" % [corp_label, BBQ_CR, _ctx.corp_credits, BBQ_CL, _ctx.corp_clicks, BBQ_AG, corp_pts_link] +
-		"[b]%s[/b]  %s%d  %s%d  %s%s  %s%d  %s%s" % [runner_label, BBQ_CR, _ctx.runner_credits, BBQ_CL, _ctx.runner_clicks, BBQ_AG, runner_pts_link, BBQ_TG, _ctx.runner_tags, BBQ_MU, mu_link]
+		"[b]%s[/b]  %s%d  %s%d  %s%s  %s%d  %s%s%s" % [runner_label, BBQ_CR, _ctx.runner_credits, BBQ_CL, _ctx.runner_clicks, BBQ_AG, runner_pts_link, BBQ_TG, _ctx.runner_tags, BBQ_MU, mu_link, core_dmg_suffix]
 	)
 	
 	#corp_hand_label.text = "Corp HQ Hand (%d cards):\n%s" % [_ctx.corp_hand.size(), _format_hand(_ctx.corp_hand)]
@@ -165,14 +169,17 @@ func _update_hands() -> void:
 			corp_hand_container.add_child(card_view)
 			card_view.setup(record, true)   # hand cards are always face-up
 
-	# Runner hand
-	for entry in _ctx.runner_hand:
+	# Runner hand — includes faceup-hosted cards (Bling, Madani, etc.) as if in grip.
+	for entry in _ctx.get_runner_effective_hand():
 		var record = entry.get("card_record") if entry is Dictionary else null
 		if record:
 			var card_view = CardView.new()
 			runner_hand_container.add_child(card_view)
 			card_view.setup(record, true)
 			card_view.clicked.connect(_on_runner_hand_card_clicked)
+			# Tint hosted cards so the player can distinguish them from grip cards.
+			if (entry as Dictionary).has("hosted_on"):
+				card_view.modulate = Color(0.75, 0.85, 1.0)
 
 func _on_runner_hand_card_clicked(card_record: CardRecord) -> void:
 	if _ctx.active_player != "runner":
@@ -234,7 +241,10 @@ func _update_servers() -> void:
 
 func _create_server_column(server_id: String, server: Server) -> VBoxContainer:
 	var col = VBoxContainer.new()
-	col.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	# Fixed minimum width per column so the HBoxContainer has a natural (measurable)
+	# size. The parent ScrollContainer scrolls horizontally when the total exceeds
+	# the panel width — prevents overflow off the right edge with many remote servers.
+	col.custom_minimum_size = Vector2(120, 0)
 	col.add_theme_constant_override("separation", 4)
 
 	# Server name label — use icon for central servers
@@ -1034,6 +1044,43 @@ func show_encounter_prompt(encounter: EncounterState) -> Dictionary:
 			)
 			leech_row.add_child(spend_btn)
 
+	# Self-break ability (e.g. N-Pot: 3cr to break 1 sub, runner-only)
+	if _ability_registry != null and encounter.ice_card != null:
+		var ice_def: Dictionary = _ability_registry._abilities.get(encounter.ice_card.card_id, {}) as Dictionary
+		var self_break: Dictionary = ice_def.get("runner_self_break", {}) as Dictionary
+		if not self_break.is_empty():
+			var sb_cost: int = self_break.get("cost_per_sub", 0)
+			var has_unbroken := false
+			for i in range(encounter.subroutines.size()):
+				if not encounter.is_broken(i):
+					has_unbroken = true
+					break
+			if has_unbroken:
+				var sb_header := Label.new()
+				sb_header.text = "SELF-BREAK (%dcr each):" % sb_cost
+				sb_header.add_theme_font_size_override("font_size", 10)
+				sb_header.add_theme_color_override("font_color", Color(0.6, 0.85, 1.0))
+				prompt_box.add_child(sb_header)
+				for i in range(encounter.subroutines.size()):
+					if encounter.is_broken(i):
+						continue
+					var sub: Dictionary = encounter.subroutines[i] as Dictionary
+					var sb_btn := Button.new()
+					sb_btn.text = "%dcr: Break \"%s\"" % [sb_cost, sub.get("label", "sub %d" % i)]
+					sb_btn.add_theme_font_size_override("font_size", 10)
+					sb_btn.add_theme_color_override("font_color", Color(0.4, 0.85, 1.0))
+					if _ctx.runner_credits < sb_cost:
+						sb_btn.disabled = true
+					var captured_i := i
+					sb_btn.pressed.connect(func():
+						encounter_action_resolved.emit({
+							"type": "break_self_sub",
+							"sub_index": captured_i,
+							"cost": sb_cost
+						})
+					)
+					prompt_box.add_child(sb_btn)
+
 	# Pass button
 	var pass_btn := Button.new()
 	pass_btn.text = "Pass (let subs fire)"
@@ -1634,6 +1681,134 @@ func show_ice_swap_prompt(eligible_servers: Array) -> Variant:
 
 	backdrop.queue_free()
 	_update_all_displays()
+	return result
+
+
+# ── Pay-to-avoid-damage prompt (Measured Response) ───────────────────────────
+
+func show_pay_to_avoid_damage_prompt(cost: int, damage: int, damage_type: String) -> bool:
+	var result := false
+	var done   := false
+
+	var backdrop := ColorRect.new()
+	backdrop.color = Color(0, 0, 0, 0.5)
+	backdrop.set_anchors_preset(Control.PRESET_FULL_RECT)
+	backdrop.mouse_filter = Control.MOUSE_FILTER_STOP
+	add_child(backdrop)
+
+	var panel := PanelContainer.new()
+	panel.set_anchors_preset(Control.PRESET_CENTER)
+	panel.custom_minimum_size = Vector2(360, 0)
+	backdrop.add_child(panel)
+
+	var vbox := VBoxContainer.new()
+	vbox.add_theme_constant_override("separation", 10)
+	panel.add_child(vbox)
+
+	var lbl := Label.new()
+	lbl.text = "Corp plays Measured Response!\nPay %d cr to prevent %d %s damage?" % [
+		cost, damage, damage_type.capitalize()
+	]
+	lbl.add_theme_font_size_override("font_size", 13)
+	lbl.add_theme_color_override("font_color", Color(1.0, 0.65, 0.3))
+	lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	vbox.add_child(lbl)
+
+	var credits_lbl := Label.new()
+	credits_lbl.text = "You have %d credit(s)." % _ctx.runner_credits
+	credits_lbl.add_theme_font_size_override("font_size", 11)
+	credits_lbl.add_theme_color_override("font_color", Color(0.55, 0.55, 0.6))
+	vbox.add_child(credits_lbl)
+
+	var btn_row := HBoxContainer.new()
+	btn_row.add_theme_constant_override("separation", 8)
+	vbox.add_child(btn_row)
+
+	var no_btn := Button.new()
+	no_btn.text = "Take %d Damage" % damage
+	no_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	no_btn.add_theme_color_override("font_color", Color(1.0, 0.4, 0.4))
+	no_btn.pressed.connect(func():
+		result = false
+		done = true
+	)
+	btn_row.add_child(no_btn)
+
+	var yes_btn := Button.new()
+	yes_btn.text = "Pay %d cr" % cost
+	yes_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	yes_btn.add_theme_color_override("font_color", Color(0.4, 0.9, 0.5))
+	if _ctx.runner_credits < cost:
+		yes_btn.disabled = true
+	yes_btn.pressed.connect(func():
+		result = true
+		done = true
+	)
+	btn_row.add_child(yes_btn)
+
+	while not done:
+		await get_tree().process_frame
+
+	backdrop.queue_free()
+	return result
+
+
+# ── Optional ability prompt (e.g. Cacophony end-of-turn counter spend) ───────
+
+func show_optional_ability_prompt(prompt_text: String) -> bool:
+	var result := false
+	var done   := false
+
+	var backdrop := ColorRect.new()
+	backdrop.color = Color(0, 0, 0, 0.5)
+	backdrop.set_anchors_preset(Control.PRESET_FULL_RECT)
+	backdrop.mouse_filter = Control.MOUSE_FILTER_STOP
+	add_child(backdrop)
+
+	var panel := PanelContainer.new()
+	panel.set_anchors_preset(Control.PRESET_CENTER)
+	panel.custom_minimum_size = Vector2(340, 0)
+	backdrop.add_child(panel)
+
+	var vbox := VBoxContainer.new()
+	vbox.add_theme_constant_override("separation", 10)
+	panel.add_child(vbox)
+
+	var lbl := Label.new()
+	lbl.text = prompt_text
+	lbl.add_theme_font_size_override("font_size", 13)
+	lbl.add_theme_color_override("font_color", Color(0.85, 0.9, 1.0))
+	lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	vbox.add_child(lbl)
+
+	var btn_row := HBoxContainer.new()
+	btn_row.add_theme_constant_override("separation", 8)
+	vbox.add_child(btn_row)
+
+	var no_btn := Button.new()
+	no_btn.text = "Decline"
+	no_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	no_btn.add_theme_color_override("font_color", Color(0.6, 0.6, 0.65))
+	no_btn.pressed.connect(func():
+		result = false
+		done = true
+	)
+	btn_row.add_child(no_btn)
+
+	var yes_btn := Button.new()
+	yes_btn.text = "Activate"
+	yes_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	yes_btn.add_theme_color_override("font_color", Color(0.4, 0.9, 0.5))
+	yes_btn.pressed.connect(func():
+		result = true
+		done = true
+	)
+	btn_row.add_child(yes_btn)
+
+	while not done:
+		await get_tree().process_frame
+
+	backdrop.queue_free()
 	return result
 
 

@@ -47,7 +47,9 @@ func choose_rez(card: InstalledCard, ctx: GameContext) -> bool:
 
 func _should_rez_ice(card: InstalledCard, ctx: GameContext) -> bool:
 	var record: CardRecord = card.card_record
-	var rez_cost: int      = max(0, record.cost)
+	# Use the same cost formula as RunStateMachine._rez_card so the decision
+	# never diverges from what the engine will actually charge.
+	var rez_cost: int = ctx.query_rez_cost(card) + ctx.run_modifiers.get("extra_rez_cost", 0)
 
 	# Gate 1: can we afford it?
 	if ctx.corp_credits < rez_cost:
@@ -121,7 +123,7 @@ func _runner_can_trivially_break(card: InstalledCard, ctx: GameContext) -> bool:
 
 func _should_rez_non_ice(card: InstalledCard, ctx: GameContext) -> bool:
 	var record: CardRecord = card.card_record
-	var rez_cost: int      = max(0, record.cost)
+	var rez_cost: int = ctx.query_rez_cost(card) + ctx.run_modifiers.get("extra_rez_cost", 0)
 
 	# Gate 1: can we afford it?
 	if ctx.corp_credits < rez_cost:

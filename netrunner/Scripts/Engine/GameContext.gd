@@ -32,6 +32,8 @@ var corp_deck: Array[CardRecord] = []
 var runner_deck: Array[CardRecord] = []
 var corp_discard: Array[CardRecord] = []
 var runner_discard: Array[CardRecord] = []
+# Remove-from-game zone: cards sent here by effects like Plutus can never be accessed.
+var corp_rfg: Array[CardRecord] = []
 # Cards in Archives that were installed unrezzed when trashed — facedown until accessed.
 var corp_discard_facedown: Dictionary = {}
 # Instance IDs of cards the Corp installed this turn (for Seamless Launch restriction)
@@ -39,6 +41,9 @@ var corp_installed_this_turn: Array = []
 
 # ── Score areas ───────────────────────────────────────────────────────────────
 var corp_score_area: Array[CardRecord] = []
+# Parallel array to corp_score_area — stores the InstalledCard objects so Dividends
+# abilities can read/write counters on scored agendas after they leave the server.
+var corp_score_area_cards: Array = []   # Array[InstalledCard]
 var runner_score_area: Array[CardRecord] = []
 
 # ── Servers ───────────────────────────────────────────────────────────────────
@@ -62,6 +67,16 @@ var accessed_card_id:   String = ""
 # Used by conditional install costs (e.g. Carmen: costs 3 instead of 5).
 # Cleared at the start of each runner turn.
 var runner_made_successful_run_this_turn: bool = false
+# Tracks whether the runner made a successful run during their previous turn.
+# Saved at the start of each Corp turn, used by Public Trail's play condition.
+var runner_made_successful_run_last_turn: bool = false
+# Tracks whether the runner stole an agenda during the current run.
+# Set in RunStateMachine._steal_agenda; cleared at the start of each run.
+# Used by AMAZE Amusements run_end trigger.
+var runner_stole_agenda_this_run: bool = false
+# NBN: Reality Plus — once per turn the Corp gains 2 cr or draws 2 cards when the
+# Runner takes a tag. Cleared at the start of each Corp turn.
+var corp_used_reality_plus_this_turn: bool = false
 # Tracks which central server IDs the runner has already attempted this turn.
 # Used by Red Team to enforce "a central you have not already run this turn".
 # Cleared at the start of each runner turn.
@@ -84,15 +99,40 @@ var corp_discarded_to_hand_limit_last_turn: bool = false
 # Used by Neurospike to determine both play legality and damage amount.
 # Cleared at the start of each Corp turn.
 var corp_last_scored_agenda_points: int = 0
+# Counts agendas scored this Corp turn. Used to gate "first agenda" triggers.
+var corp_agendas_scored_this_turn: int = 0
 # Run modifiers: set by run-initiating events, cleared when the run ends.
 # Supported keys:
 #   "extra_rez_cost"    : int — Corp pays extra to rez ice (Tread Lightly)
 #   "bonus_access"      : int — Runner accesses extra cards on breach (Jailbreak, Conduit)
 #   "icebreaker_credits": int — Credits usable only on icebreakers this run (Overclock)
 var run_modifiers: Dictionary = {}
+# Identity flip state — overrides the CardRecord title when a flip-identity is on its
+# secondary face.  Empty string = primary face (use CardRecord title normally).
+var runner_identity_face_title: String = ""
+var corp_identity_face_title:   String = ""
+# Tracks whether the Corp played at least one operation this turn (for Nebula Making Stars).
+# Cleared at the start of each Corp turn.
+var corp_played_operation_this_turn: bool = false
+# Tracks card IDs accessed during an Archives breach this run (for Charm Offensive).
+# Cleared at the start of each run by RunStateMachine.execute().
+var run_accessed_archives_card_ids: Array = []
+# Tracks whether the runner has made a successful run on HQ this turn (for Détente).
+# Cleared at the start of each runner turn.
+var runner_hq_successful_run_this_turn: bool = false
+# Accumulated icebreaker strength boosts that persist for the current run (GAMEDRAGON Pro).
+# Keys: icebreaker runtime_instance_id → total accumulated boost.
+# Cleared at the start of each run by RunStateMachine.execute().
+var run_level_strength_boosts: Dictionary = {}
 
 # Transient event payload accessible by the AbilityInterpreter during execution
 var current_event_data: Dictionary = {}
+
+# Once-per-turn trigger guard.
+# Key: "<card_instance_id>:<once_per_turn_key>" → true when this trigger has already
+# fired this turn.  Cleared at the start of each player's turn by TurnManager.
+# Enables the JSON "once_per_turn_key" field on event blocks.
+var once_per_turn_triggered: Dictionary = {}
 
 # ── Game state ────────────────────────────────────────────────────────────────
 var turn_number:   int    = 1
@@ -101,6 +141,9 @@ var turn_number:   int    = 1
 # Hand size modifiers — adjusted by scored agendas, installed cards, etc.
 var corp_hand_size_bonus:   int = 0   # added to base of 5
 var runner_hand_size_bonus: int = 0   # added to base of 5
+# Core damage permanently reduces the runner's maximum hand size by 1 per point.
+# Flatline occurs if runner_max_hand_size() drops below 0.
+var runner_core_damage_taken: int = 0
 var active_player: String = "corp"
 var game_over:     bool   = false
 var winner:        String = ""
@@ -115,21 +158,96 @@ var runner_identity: CardRecord = null
 # "Haas-Bioroid: Precision Design" → "Precision Design"
 # "The Catalyst: Convention Breaker" → "The Catalyst"
 func corp_name() -> String:
-	if corp_identity == null:
+	var title: String
+	if corp_identity_face_title != "":
+		title = corp_identity_face_title
+	elif corp_identity != null:
+		title = corp_identity.title
+	else:
 		return "Corp"
-	var title: String = corp_identity.title
 	var colon: int = title.find(": ")
 	return title.substr(colon + 2) if colon >= 0 else title
 
 func runner_name() -> String:
-	if runner_identity == null:
+	var title: String
+	if runner_identity_face_title != "":
+		title = runner_identity_face_title
+	elif runner_identity != null:
+		title = runner_identity.title
+	else:
 		return "Runner"
-	var title: String = runner_identity.title
 	var colon: int = title.find(": ")
 	return title.substr(colon + 2) if colon >= 0 else title
 
 func player_name(player: String) -> String:
 	return corp_name() if player == "corp" else runner_name()
+
+# ── Faceup hosting helpers ────────────────────────────────────────────────────
+
+# Returns all faceup-hosted CardRecords across all runner rig cards,
+# wrapped as hand-entry Dicts with an extra "hosted_on" key pointing to the
+# hosting InstalledCard's runtime_instance_id.  Used by effects that treat
+# hosted cards "as if they were in the grip."
+func get_runner_effective_hand() -> Array:
+	var result: Array = runner_hand.duplicate()
+	for rig_c in runner_rig:
+		var ic: InstalledCard = rig_c as InstalledCard
+		if ic == null or ic.faceup_hosted_cards.is_empty():
+			continue
+		for hosted_cr in ic.faceup_hosted_cards:
+			var cr: CardRecord = hosted_cr as CardRecord
+			if cr == null:
+				continue
+			result.append({"card_id": cr.id, "card_record": cr, "hosted_on": ic.runtime_instance_id})
+	return result
+
+
+# Remove a CardRecord from either the runner_hand or faceup_hosted_cards of
+# any rig card.  Prefers hand; falls back to hosted.
+func remove_from_runner_effective_hand(record: CardRecord) -> void:
+	for i in range(runner_hand.size()):
+		var entry: Dictionary = runner_hand[i] as Dictionary
+		if entry.get("card_id", "") == record.id:
+			runner_hand.remove_at(i)
+			return
+	for rig_c in runner_rig:
+		var ic: InstalledCard = rig_c as InstalledCard
+		if ic == null:
+			continue
+		for i in range(ic.faceup_hosted_cards.size()):
+			var cr: CardRecord = ic.faceup_hosted_cards[i] as CardRecord
+			if cr != null and cr.id == record.id:
+				ic.faceup_hosted_cards.remove_at(i)
+				return
+
+
+# ── GAMEDRAGON Pro helpers ────────────────────────────────────────────────────
+
+# Returns true if at least one GAMEDRAGON Pro in the rig is attached to this breaker.
+func has_gamedragon_attached(breaker: InstalledCard) -> bool:
+	for rig_c in runner_rig:
+		var ic: InstalledCard = rig_c as InstalledCard
+		if ic != null and ic.card_id == "gamedragon_pro" \
+				and ic.hosted_on_id == breaker.runtime_instance_id:
+			return true
+	return false
+
+
+# Returns the total +strength bonus granted to a breaker by attached GAMEDRAGON Pros.
+func gamedragon_breaker_bonus(breaker: InstalledCard) -> int:
+	var bonus := 0
+	for rig_c in runner_rig:
+		var ic: InstalledCard = rig_c as InstalledCard
+		if ic != null and ic.card_id == "gamedragon_pro" \
+				and ic.hosted_on_id == breaker.runtime_instance_id:
+			bonus += 1
+	return bonus
+
+
+# Returns the run-level accumulated strength boost for a specific icebreaker.
+func get_run_level_boost(breaker_instance_id: String) -> int:
+	return run_level_strength_boosts.get(breaker_instance_id, 0)
+
 
 # ── Memory Unit tracking ───────────────────────────────────────────────────────
 
@@ -290,6 +408,21 @@ func get_installed_card_by_instance_id(instance_id: String) -> InstalledCard:
 		var c: InstalledCard = card as InstalledCard
 		if c.runtime_instance_id == instance_id:
 			return c
+	# Also check scored agendas — needed for Dividends counter effects that fire
+	# during on_score (the card has already been removed from its server by then).
+	for card in corp_score_area_cards:
+		var c: InstalledCard = card as InstalledCard
+		if c != null and c.runtime_instance_id == instance_id:
+			return c
+	return null
+
+
+# Find a scored Corp agenda by runtime_instance_id.
+func get_scored_agenda_by_instance_id(instance_id: String) -> InstalledCard:
+	for card in corp_score_area_cards:
+		var c: InstalledCard = card as InstalledCard
+		if c != null and c.runtime_instance_id == instance_id:
+			return c
 	return null
 
 
@@ -331,6 +464,22 @@ func unregister_all_card_effects(instance_id: String) -> void:
 			if list[i]["card_instance_id"] == instance_id:
 				list.remove_at(i)
 				
+	for mod_type in _state_modifiers:
+		var list: Array = _state_modifiers[mod_type]
+		for i in range(list.size() - 1, -1, -1):
+			if list[i]["card_instance_id"] == instance_id:
+				list.remove_at(i)
+
+# Like unregister_all_card_effects but preserves a single event type's listener.
+# Used by trash_self_on_use (Boomerang) to keep run_end alive until after the run.
+func unregister_card_effects_except_event(instance_id: String, keep_event: String) -> void:
+	for event_type in _event_listeners:
+		if event_type == keep_event:
+			continue
+		var list: Array = _event_listeners[event_type]
+		for i in range(list.size() - 1, -1, -1):
+			if list[i]["card_instance_id"] == instance_id:
+				list.remove_at(i)
 	for mod_type in _state_modifiers:
 		var list: Array = _state_modifiers[mod_type]
 		for i in range(list.size() - 1, -1, -1):
@@ -401,7 +550,17 @@ func _execute_player_trigger_queue(triggers: Array[Dictionary], player: String, 
 			
 		# pop_at removes the element AND returns it cleanly
 		var targeting_trigger: Dictionary = triggers.pop_at(chosen_idx)
-		
+
+		# Once-per-turn guard: if the ability block carries "once_per_turn_key",
+		# skip firing if this card has already fired that key this turn.
+		var opt_key: String = (targeting_trigger["ability_def"] as Dictionary).get("once_per_turn_key", "")
+		if opt_key != "":
+			var opt_iid: String = targeting_trigger.get("card_instance_id", "")
+			var opt_full_key := "%s:%s" % [opt_iid, opt_key]
+			if once_per_turn_triggered.get(opt_full_key, false):
+				continue   # already fired this turn — skip
+			once_per_turn_triggered[opt_full_key] = true
+
 		# Set transient variable — merge card's own instance_id so self-referencing
 		# effects (add_self_counters, etc.) can find the owning card
 		var merged_data: Dictionary = event_data.duplicate()
@@ -426,7 +585,12 @@ func get_card_owner_by_instance_id(instance_id: String) -> String:
 		var c: InstalledCard = card as InstalledCard
 		if c.runtime_instance_id == instance_id:
 			return "runner"
-	# 3. Identity fallbacks
+	# 3. Scored agendas (Dividends click actions)
+	for card in corp_score_area_cards:
+		var c: InstalledCard = card as InstalledCard
+		if c != null and c.runtime_instance_id == instance_id:
+			return "corp"
+	# 4. Identity fallbacks
 	if instance_id == "identity_runner" or instance_id.begins_with("runner_identity"):
 		return "runner"
 	if instance_id == "identity_corp":
@@ -447,6 +611,15 @@ func runner_agenda_points() -> int:
 	for card in runner_score_area:
 		total += (card as CardRecord).agenda_points
 	return total
+
+# ── Threat ────────────────────────────────────────────────────────────────────
+# "Threat level" is the runner's current agenda point total.
+# Cards with "threat X" abilities are active whenever threat_level() >= X.
+# All threat checks go through this single function so the definition stays
+# consistent and can be extended later (e.g. threat bonuses from identity
+# abilities) without touching every card.
+func threat_level() -> int:
+	return runner_agenda_points()
 
 
 # ── Credit helpers ────────────────────────────────────────────────────────────
@@ -474,6 +647,9 @@ func query_dynamic_breaker_base(breaker: InstalledCard) -> int:
 			"installed_icebreaker_count":
 				# Both Unity and Echelon count all installed icebreakers including themselves
 				return count_installed_icebreakers()
+			"fracter_in_heap_count":
+				# Rising Tide: +1 strength per fracter in the heap
+				return count_fracters_in_heap()
 	return -1
 
 
@@ -489,11 +665,24 @@ func count_installed_icebreakers() -> int:
 	return count
 
 
+func count_fracters_in_heap() -> int:
+	# Count fracter icebreakers in the runner's discard pile (heap).
+	# Used by Rising Tide's dynamic base-strength modifier.
+	var count := 0
+	for card in runner_discard:
+		var r: CardRecord = card as CardRecord
+		if r == null:
+			continue
+		if r.has_subtype("fracter") or r.subtypes.any(func(s): return s == "fracter"):
+			count += 1
+	return count
+
+
 func corp_max_hand_size() -> int:
 	return 5 + corp_hand_size_bonus
 
 func runner_max_hand_size() -> int:
-	return 5 + runner_hand_size_bonus
+	return 5 + runner_hand_size_bonus - runner_core_damage_taken
 
 
 func get_credits(subject: String) -> int:
@@ -520,6 +709,96 @@ func runner_spend_credits(amount: int) -> bool:
 	runner_credits -= from_own
 	return true
 
+
+# ── Recurring credit helpers ──────────────────────────────────────────────────
+
+# Total credits available for trash costs: regular pool + Overclock + Azimat recurring credits.
+func runner_trash_credits_available() -> int:
+	var total: int = runner_credits + run_modifiers.get("overclock_credits", 0)
+	for mod in _state_modifiers.get("runner_trash_recurring_credits", []):
+		var d := mod as Dictionary
+		var iid: String = d.get("card_instance_id", "")
+		var card := get_installed_card_by_instance_id(iid)
+		if card != null:
+			total += card.get_counter("recurring_credits")
+	return total
+
+
+# Spend credits for a trash cost: drain Azimat recurring credits first, then Overclock, then pool.
+func runner_spend_for_trash(amount: int) -> bool:
+	if runner_trash_credits_available() < amount:
+		return false
+	var remaining := amount
+	# Drain recurring trash credits first (e.g. Azimat)
+	for mod in _state_modifiers.get("runner_trash_recurring_credits", []):
+		if remaining <= 0:
+			break
+		var d := mod as Dictionary
+		var iid: String = d.get("card_instance_id", "")
+		var card := get_installed_card_by_instance_id(iid)
+		if card != null:
+			var avail: int = card.get_counter("recurring_credits")
+			var spend: int = min(avail, remaining)
+			if spend > 0:
+				card.remove_counter("recurring_credits", spend)
+				send_log("%s: spends %d recurring credit(s) on trash (%d remaining)." % [
+					card.display_name(), spend, card.get_counter("recurring_credits")
+				])
+				remaining -= spend
+	# Then drain Overclock pool
+	if remaining > 0:
+		var overclock: int = run_modifiers.get("overclock_credits", 0)
+		var from_oc: int = min(remaining, overclock)
+		if from_oc > 0:
+			run_modifiers["overclock_credits"] = overclock - from_oc
+			remaining -= from_oc
+	# Finally drain runner's own credits
+	if remaining > 0:
+		runner_credits -= remaining
+	return true
+
+
+# Total credits Corp can use to rez a card on a specific server: corp pool + Mahkota recurring.
+func corp_rez_credits_available(server_id: String) -> int:
+	var total: int = corp_credits
+	for mod in _state_modifiers.get("corp_rez_recurring_credits", []):
+		var d := mod as Dictionary
+		if d.get("server_id", "") == server_id:
+			var iid: String = d.get("card_instance_id", "")
+			var card := get_installed_card_by_instance_id(iid)
+			if card != null and card.is_rezzed:
+				total += card.get_counter("recurring_credits")
+	return total
+
+
+# Spend credits for a rez cost: drain Mahkota recurring credits first, then corp pool.
+func corp_spend_for_rez(amount: int, server_id: String) -> bool:
+	if corp_rez_credits_available(server_id) < amount:
+		return false
+	var remaining := amount
+	# Drain Mahkota recurring credits first
+	for mod in _state_modifiers.get("corp_rez_recurring_credits", []):
+		if remaining <= 0:
+			break
+		var d := mod as Dictionary
+		if d.get("server_id", "") == server_id:
+			var iid: String = d.get("card_instance_id", "")
+			var card := get_installed_card_by_instance_id(iid)
+			if card != null and card.is_rezzed:
+				var avail: int = card.get_counter("recurring_credits")
+				var spend: int = min(avail, remaining)
+				if spend > 0:
+					card.remove_counter("recurring_credits", spend)
+					send_log("%s: spends %d recurring credit(s) on rez (%d remaining)." % [
+						card.display_name(), spend, card.get_counter("recurring_credits")
+					])
+					remaining -= spend
+	# Then drain corp's own credits
+	if remaining > 0:
+		corp_credits -= remaining
+	return true
+
+
 func set_credits(subject: String, amount: int) -> void:
 	match subject:
 		"corp":   corp_credits   = max(0, amount)
@@ -544,6 +823,6 @@ func get_counters_on_accessed_card(counter_type: String) -> int:
 
 # ── Log ───────────────────────────────────────────────────────────────────────
 
-func log(message: String) -> void:
+func send_log(message: String) -> void:
 	event_log.append(message)
 	print("[GameContext] " + message)

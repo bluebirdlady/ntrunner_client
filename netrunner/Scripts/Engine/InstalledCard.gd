@@ -15,8 +15,17 @@ var zone:        String     = ""    # "ice" | "root"
 var runtime_instance_id: String = ""
 # Programs hosted on this ice card (Botulus, Tranquilizer)
 var hosted_cards: Array = []        # Array[InstalledCard]
+# Cards hosted faceup on this card (Bling, Détente, Madani) — CardRecord objects, not installed
+var faceup_hosted_cards: Array = [] # Array[CardRecord]
 # If non-empty, this card is hosted on the ice with this instance_id
 var hosted_on_id: String = ""
+# If non-empty, this card has a chosen target ice (Boomerang: stored instance_id of target ice)
+var target_id: String = ""
+# Subtypes dynamically granted to this ice by hosted programs (e.g. Chromatophores → barrier, code_gate, sentry).
+# Merged with card_record.subtypes during encounter/break resolution.
+var extra_subtypes: Array = []
+# Subtypes this program has granted to its host ice — stored for cleanup when this card is trashed.
+var granted_subtypes_to_host: Array = []
 
 static func make_runtime_instance(record: CardRecord, srv_id: String, srv_zone: String, rezzed: bool = false) -> InstalledCard:
 	var c = InstalledCard.make(record, srv_id, srv_zone, rezzed)
@@ -35,7 +44,10 @@ static func make(record: CardRecord, srv_id: String, srv_zone: String, rezzed: b
 	c.is_rezzed  = rezzed
 	c.counters   = {"advancement": 0, "power": 0, "credits": 0}
 	c.hosted_cards = []
+	c.faceup_hosted_cards = []
 	c.hosted_on_id = ""
+	c.extra_subtypes = []
+	c.granted_subtypes_to_host = []
 	return c
 
 
@@ -73,3 +85,12 @@ func display_name() -> String:
 	if card_record != null:
 		return card_record.title
 	return "(%s)" % card_id
+
+
+# Returns true if this installed card (typically ice) has the given subtype considering
+# both its printed subtypes and any dynamically granted extra_subtypes.
+func has_effective_subtype(st: String) -> bool:
+	var normalized: String = st.to_lower().replace(" ", "_")
+	if card_record != null and card_record.subtypes.has(normalized):
+		return true
+	return extra_subtypes.has(normalized)

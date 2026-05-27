@@ -63,6 +63,10 @@ func get_on_score(card_id: String) -> Variant:
 func get_on_steal(card_id: String) -> Variant:
 	return _get_trigger(card_id, "on_steal")
 
+# Returns the on_forfeit definition dict, or null if not defined.
+func get_on_forfeit(card_id: String) -> Variant:
+	return _get_trigger(card_id, "on_forfeit")
+
 # Returns array of subroutine dicts, or [] if none defined.
 func get_subroutines(card_id: String) -> Array:
 	if not _abilities.has(card_id):
@@ -115,6 +119,13 @@ func get_boost(card_id: String) -> Variant:
 # Returns true if this card has icebreaker abilities.
 func is_icebreaker(card_id: String) -> bool:
 	return get_break(card_id) != null
+
+# Returns a top-level boolean flag from the ability definition (e.g. "fracter_only_break").
+func get_flag(card_id: String, flag_name: String) -> bool:
+	if not _abilities.has(card_id):
+		return false
+	var card_def: Dictionary = _abilities[card_id] as Dictionary
+	return card_def.get(flag_name, false) as bool
 
 
 # ── Internal ──────────────────────────────────────────────────────────────────

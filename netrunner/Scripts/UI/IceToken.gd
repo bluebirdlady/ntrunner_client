@@ -47,10 +47,14 @@ func setup(card: InstalledCard) -> void:
 		var record = card.card_record
 		name_label.text = record.title
 		
-		# Find ice subtype
+		# Find ice subtype — include runtime-granted extra subtypes (e.g. Chromatophores)
 		var subtype = ""
-		for st in record.subtypes:
-			var st_lower = st.to_lower()
+		var all_ice_subtypes: Array = record.subtypes.duplicate()
+		for es in card.extra_subtypes:
+			if not all_ice_subtypes.has(es):
+				all_ice_subtypes.append(es)
+		for st in all_ice_subtypes:
+			var st_lower = (st as String).to_lower().replace("_", " ")
 			if st_lower in ["barrier", "code gate", "sentry"]:
 				subtype = st_lower.capitalize()
 				break

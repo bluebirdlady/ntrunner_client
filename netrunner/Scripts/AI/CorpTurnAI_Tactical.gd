@@ -64,19 +64,42 @@ func _generate_candidates(ctx: GameContext) -> Array:
 	if almost != null and ctx.corp_credits >= 1:
 		candidates.append(GameAction.advance(almost.card_id))
 
-	# ── Install agenda into existing protected remote ─────────────────────────
+	# ── Play operations from hand ─────────────────────────────────────────────
+	# All affordable operations become candidates; the evaluator picks the best.
+	for op in _find_playable_operations(ctx):
+		candidates.append(GameAction.play_operation(op as CardRecord))
+
+	# ── Install agenda ────────────────────────────────────────────────────────
 	var agenda: CardRecord = _find_agenda_in_hand(ctx)
 	if agenda != null and ctx.corp_credits >= max(0, agenda.cost):
 		var protected: Server = _find_protected_empty_remote(ctx)
 		if protected != null:
+			# Install into an already-iced remote — best case.
 			candidates.append(GameAction.install(agenda, protected.server_id))
+		else:
+			# No ready remote: install into a new one if we have ICE to follow up.
+			# Use the "new_remote" sentinel; TurnManager creates the server on execute.
+			var backup_ice: CardRecord = _find_ice_in_hand(ctx)
+			if backup_ice != null and ctx.corp_credits >= max(0, agenda.cost) + 1:
+				candidates.append(GameAction.install(agenda, "new_remote"))
 
-	# ── Ice on unprotected centrals ───────────────────────────────────────────
+	# ── Install asset in new remote ───────────────────────────────────────────
+	var asset: CardRecord = _find_asset_in_hand(ctx)
+	if asset != null and ctx.corp_credits >= max(0, asset.cost):
+		candidates.append(GameAction.install(asset, "new_remote"))
+
+	# ── Ice on centrals (first layer AND reinforcement up to 2 layers) ────────
 	var ice: CardRecord = _find_ice_in_hand(ctx)
-	if ice != null and ctx.corp_credits >= max(0, ice.cost):
-		if not _server_has_ice(ctx, "hq"):
+	if ice != null:
+		var hq_srv: Server = ctx.get_server("hq")
+		var rd_srv: Server = ctx.get_server("rd")
+		var hq_ice: int    = hq_srv.ice.size() if hq_srv != null else 0
+		var rd_ice: int    = rd_srv.ice.size() if rd_srv != null else 0
+		# Install on HQ if it has fewer than 2 layers and we can afford it
+		if hq_ice < 2 and ctx.corp_credits >= hq_ice:  # install cost = existing ice count
 			candidates.append(GameAction.install(ice, "hq", "ice"))
-		if not _server_has_ice(ctx, "rd"):
+		# Install on R&D if it has fewer than 2 layers and we can afford it
+		if rd_ice < 2 and ctx.corp_credits >= rd_ice:
 			candidates.append(GameAction.install(ice, "rd", "ice"))
 		# Ice on vulnerable agenda remote
 		var vuln: Server = _find_agenda_remote_needing_ice(ctx)

@@ -21,6 +21,9 @@ var available_breakers: Array = []   # Array[InstalledCard]
 
 # Optional GameContext reference for querying board-wide modifiers (e.g. Turbine)
 var ctx: Object = null
+# When true, only fracters can break subroutines on this ice (Semak-samun restriction).
+# AI icebreakers are excluded from breaking when this is set.
+var fracter_only_break: bool = false
 
 
 # ── Construction ──────────────────────────────────────────────────────────────
@@ -33,6 +36,10 @@ static func make(ice: InstalledCard, subs: Array, breakers: Array, game_ctx: Obj
 	e.broken_indices   = []
 	e.available_breakers = breakers.duplicate()
 	e.ctx              = game_ctx
+	# GAMEDRAGON Pro: carry forward any run-level strength boosts into this encounter.
+	if game_ctx != null and game_ctx.get("run_level_strength_boosts") != null:
+		for breaker_id in game_ctx.run_level_strength_boosts:
+			e.temp_strength_boosts[breaker_id] = game_ctx.run_level_strength_boosts[breaker_id]
 	return e
 
 
@@ -48,7 +55,11 @@ func get_breaker_strength(breaker: InstalledCard) -> int:
 	var board_bonus: int = 0
 	if ctx != null and ctx.has_method("query_breaker_strength_bonus"):
 		board_bonus = ctx.query_breaker_strength_bonus()
-	return base + permanent + boost + board_bonus
+	# GAMEDRAGON Pro: +1 strength per attached GAMEDRAGON Pro
+	var gamedragon_bonus: int = 0
+	if ctx != null and ctx.has_method("gamedragon_breaker_bonus"):
+		gamedragon_bonus = ctx.gamedragon_breaker_bonus(breaker)
+	return base + permanent + boost + board_bonus + gamedragon_bonus
 
 
 func _resolve_breaker_base_strength(breaker: InstalledCard) -> int:
@@ -100,7 +111,11 @@ func breakers_for_ice() -> Array:
 	if ice_card == null or ice_card.card_record == null:
 		return []
 
-	var ice_subtypes: Array = ice_card.card_record.subtypes
+	# Merge printed subtypes with runtime-granted subtypes (e.g. Chromatophores grants barrier/code_gate/sentry)
+	var ice_subtypes: Array = ice_card.card_record.subtypes.duplicate()
+	for es in ice_card.extra_subtypes:
+		if not ice_subtypes.has(es):
+			ice_subtypes.append(es)
 	var result: Array       = []
 
 	for breaker in available_breakers:
@@ -116,9 +131,10 @@ func breakers_for_ice() -> Array:
 func _breaker_matches_ice(breaker: InstalledCard, ice_subtypes: Array) -> bool:
 	var breaker_subtypes: Array = breaker.card_record.subtypes
 
-	# AI breakers can interact with any ice
+	# AI breakers can interact with any ice — unless fracter_only_break restricts this ice
+	# (e.g. Semak-samun: only fracters may break its printed subroutine)
 	if breaker_subtypes.has("ai"):
-		return true
+		return not fracter_only_break
 
 	# Standard matching: fracter/barrier, decoder/code_gate, killer/sentry
 	const MATCHES := {
