@@ -14,7 +14,7 @@
 			"fiction_pre": "act1_pre",
 			"fiction_post": "act1_post",
 			"opponent_id": "hb_syndicate",
-			"unlocks_missions": ["act2a_weyland", "act2b_jinteki"],
+			"unlocks_missions": ["act2a_weyland", "act2b_jinteki", "act2c_nbn"],
 			"unlocks_cards": [],
 			"prerequisite_missions": []
 		},
@@ -29,8 +29,26 @@
 			"opponent_id": "weyland_built_to_last",
 			"unlocks_missions": ["act3a_hb"],
 			"unlocks_cards": [
-				"conduit", "daily_casts", "earthrise_hotel",
-				"mutual_favor", "leech", "k2cp_turbine"
+				{"id": "conduit", "count": 2},
+				{"id": "mutual_favor", "count": 3},
+				{"id": "leech", "count": 3},
+				"zahya_sadeghi_versatile_smuggler"
+			],
+			"prerequisite_missions": ["act1_hb"]
+		},
+		{
+			"id": "act2c_nbn",
+			"title": "Broadcast",
+			"subtitle": "NBN Regional Relay, Heinlein Broadcast Tower",
+			"act": 2,
+			"ai_level": 1,
+			"fiction_pre": "act2c_pre",
+			"fiction_post": "act2c_post",
+			"opponent_id": "nbn_reality_plus",
+			"unlocks_missions": ["act3a_hb"],
+			"unlocks_cards": [
+				"conduit", "mutual_favor", "unity", "tread_lightly",
+				"tao_salonga_telepresence_magician"
 			],
 			"prerequisite_missions": ["act1_hb"]
 		},
@@ -45,8 +63,8 @@
 			"opponent_id": "jinteki_replicating",
 			"unlocks_missions": ["act3a_hb"],
 			"unlocks_cards": [
-				"conduit", "daily_casts", "earthrise_hotel",
-				"mutual_favor", "leech", "k2cp_turbine"
+				"conduit", "mutual_favor", "leech",
+				"rene_loup_arcemont_party_animal"
 			],
 			"prerequisite_missions": ["act1_hb"]
 		},
@@ -61,8 +79,23 @@
 			"opponent_id": "hb_precision_design",
 			"unlocks_missions": ["act3b_jinteki_rh"],
 			"unlocks_cards": [
-				"wildcat_strike", "dzmz_optimizer", "echelon",
-				"t400_memory_diamond", "buzzsaw"
+				{"id": "wildcat_strike", "count": 3},
+				{"id": "dzmz_optimizer", "count": 3},
+				{"id": "echelon", "count": 3},
+				{"id": "t400_memory_diamond", "count": 3},
+				{"id": "buzzsaw", "count": 3},
+				{"id": "pantograph", "count": 3},
+				"tao_salonga_telepresence_magician",
+				{"id": "tread_lightly",        "count": 3},
+				{"id": "unity",                "count": 3},
+				{"id": "creative_commission",  "count": 3},
+				{"id": "vrcation",             "count": 3},
+				{"id": "overclock",            "count": 3},
+				{"id": "telework_contract",    "count": 3},
+				{"id": "smartware_distributor","count": 3},
+				{"id": "mayfly",               "count": 3},
+				{"id": "cleaver",              "count": 3},
+				{"id": "carmen",               "count": 3}
 			],
 			"prerequisite_missions": ["act2a_weyland", "act2b_jinteki"]
 		},
@@ -77,8 +110,16 @@
 			"opponent_id": "jinteki_restoring_humanity",
 			"unlocks_missions": [],
 			"unlocks_cards": [
-				"botulus", "cookbook", "fermenter",
-				"tranquilizer", "marjanah", "carnivore"
+				{"id": "botulus", "count": 3},
+				{"id": "cookbook", "count": 3},
+				{"id": "fermenter", "count": 3},
+				{"id": "tranquilizer", "count": 3},
+				{"id": "marjanah", "count": 3},
+				{"id": "carnivore", "count": 3},
+				{"id": "docklands_pass", "count": 3},
+				{"id": "pennyshaver", "count": 3},
+				{"id": "red_team", "count": 3},
+				{"id": "verbal_plasticity", "count": 3}
 			],
 			"prerequisite_missions": ["act3a_hb"]
 		}
@@ -200,6 +241,30 @@
 				"diviner", "diviner", "diviner",
 				"whitespace", "whitespace", "whitespace",
 				"karuna", "karuna", "karuna",
+				"tithe", "tithe", "tithe"
+			]
+		},
+		"nbn_reality_plus": {
+			"name": "NBN",
+			"identity": "nbn_reality_plus",
+			"description": "Every tag you take is a profit centre. They are watching, and every mistake makes them richer.",
+			"deck": [
+				"tomorrows_headline",
+				"offworld_office", "offworld_office", "offworld_office",
+				"orbital_superiority", "orbital_superiority", "orbital_superiority",
+				"send_a_message",
+				"superconducting_hub",
+				"spin_doctor", "spin_doctor", "spin_doctor",
+				"regolith_mining_license", "regolith_mining_license", "regolith_mining_license",
+				"amaze_amusements", "amaze_amusements", "amaze_amusements",
+				"predictive_planogram", "predictive_planogram", "predictive_planogram",
+				"public_trail", "public_trail", "public_trail",
+				"retribution", "retribution", "retribution",
+				"hedge_fund", "hedge_fund", "hedge_fund",
+				"ping", "ping", "ping",
+				"pharos", "pharos", "pharos",
+				"funhouse", "funhouse", "funhouse",
+				"whitespace", "whitespace",
 				"tithe", "tithe", "tithe"
 			]
 		}
